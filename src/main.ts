@@ -106,17 +106,34 @@ class SideNoteView extends ItemView {
                         if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
                             this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
                             const editor = targetLeaf.view.editor;
+                            const fileContent = editor.getValue();
+
+                            // Try to find the text using regex matching (fallback to line-based if not found)
+                            const position = this.plugin.commentManager.findTextPosition(fileContent, comment.selectedText);
+
+                            let startLine = comment.startLine;
+                            let startChar = comment.startChar;
+                            let endLine = comment.endLine;
+                            let endChar = comment.endChar;
+
+                            if (position) {
+                                // Found the text using regex, use its position
+                                startLine = position.line;
+                                startChar = position.startChar;
+                                endLine = position.line;
+                                endChar = position.endChar;
+                            }
 
                             // Set selection
                             editor.setSelection(
-                                { line: comment.startLine, ch: comment.startChar },
-                                { line: comment.endLine, ch: comment.endChar }
+                                { line: startLine, ch: startChar },
+                                { line: endLine, ch: endChar }
                             );
 
                             // Scroll to the selection
                             editor.scrollIntoView({
-                                from: { line: comment.startLine, ch: 0 },
-                                to: { line: comment.endLine, ch: 0 }
+                                from: { line: startLine, ch: 0 },
+                                to: { line: endLine, ch: 0 }
                             }, true);
 
                             editor.focus();
@@ -369,6 +386,43 @@ export default class SideNote extends Plugin {
         this.addRibbonIcon("message-square", "Open comment view", () => {
             void switchToSideNoteView(this.app);
         });
+
+        // ファイルリネーム時にコメントのパスを更新
+        this.registerEvent(
+            this.app.vault.on('rename', (file, oldPath) => {
+                if (file instanceof TFile) {
+                    this.commentManager.renameFile(oldPath, file.path);
+                    void this.saveData();
+                    // Update views
+                    this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                        if (leaf.view instanceof SideNoteView) {
+                            leaf.view.renderComments();
+                        }
+                    });
+                }
+            })
+        );
+
+        // 外部からのdata.jsonの変更を監視して再読み込み
+        this.registerEvent(
+            this.app.vault.on('modify', async (file) => {
+                if (file.path === '.obsidian/plugins/side-note/data.json' ||
+                    (file instanceof TFile && file.name === 'data.json' && file.parent?.name === 'side-note')) {
+                    try {
+                        await this.loadPluginData();
+                        this.commentManager.updateComments(this.comments);
+                        // Re-render views
+                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                            if (leaf.view instanceof SideNoteView) {
+                                leaf.view.renderComments();
+                            }
+                        });
+                    } catch (error) {
+                        console.error("Error reloading plugin data:", error);
+                    }
+                }
+            })
+        );
     }
 
     async onCommentsChanged(message: string) {
