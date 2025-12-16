@@ -1,7 +1,10 @@
 import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField } from "obsidian";
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
-import { RangeSetBuilder } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+
+// Define a state effect to trigger decoration updates
+const forceUpdateEffect = StateEffect.define<null>();
 
 interface CustomViewState extends Record<string, unknown> {
     filePath: string | null;
@@ -25,6 +28,7 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
 class SideNoteView extends ItemView {
     private file: TFile | null = null;
     private plugin: SideNote;
+    private activeCommentTimestamp: number | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: SideNote, file: TFile | null = null) {
         super(leaf);
@@ -73,6 +77,21 @@ class SideNoteView extends ItemView {
         this.renderComments();
     }
 
+    /**
+     * Highlight and scroll to a specific comment
+     */
+    public highlightComment(timestamp: number) {
+        this.activeCommentTimestamp = timestamp;
+        this.renderComments();
+        // Scroll to the highlighted comment
+        setTimeout(() => {
+            const commentEl = this.containerEl.querySelector(`[data-comment-timestamp="${timestamp}"]`);
+            if (commentEl) {
+                commentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 100);
+    }
+
     public renderComments() { // Made public for settings tab to re-render
         this.containerEl.empty();
         this.containerEl.addClass("sidenote-view-container");
@@ -95,6 +114,12 @@ class SideNoteView extends ItemView {
                 const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
                 commentsForFile.forEach((comment) => {
                     const commentEl = commentsContainer.createDiv("sidenote-comment-item");
+                    commentEl.setAttribute("data-comment-timestamp", comment.timestamp.toString());
+
+                    // Highlight active comment
+                    if (this.activeCommentTimestamp === comment.timestamp) {
+                        commentEl.addClass("active");
+                    }
 
                     const headerEl = commentEl.createDiv("sidenote-comment-header");
                     const textInfoEl = headerEl.createDiv("sidenote-comment-text-info");
@@ -259,6 +284,7 @@ class CommentModal extends Modal {
     comment: string;
     onSubmit: (comment: string) => void;
     initialComment: string;
+    private textareaEl: HTMLTextAreaElement | null = null;
 
     constructor(app: App, onSubmit: (comment: string) => void, initialComment: string = '') {
         super(app);
@@ -276,19 +302,54 @@ class CommentModal extends Modal {
         const input = inputContainer.createEl("textarea");
         input.placeholder = "Enter your comment...";
         input.value = this.initialComment;
+        this.textareaEl = input;
+
+        // Add keyboard event handlers
+        input.addEventListener('keydown', (e: KeyboardEvent) => {
+            // Cmd/Ctrl + Enter to save
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                this.submitComment();
+            }
+            // Esc to cancel
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this.close();
+            }
+        });
 
         const footer = contentEl.createDiv("sidenote-modal-footer");
+        const cancelButton = footer.createEl("button", {
+            text: "Cancel"
+        });
+        cancelButton.onclick = () => {
+            this.close();
+        };
+
         const button = footer.createEl("button", {
             text: this.initialComment ? "Save" : "Add",
             cls: "mod-cta"
         });
         button.onclick = () => {
-            this.comment = input.value;
-            this.onSubmit(this.comment);
-            this.close();
+            this.submitComment();
         };
 
         input.focus();
+
+        // Click outside to close (for tablets)
+        this.modalEl.addEventListener('click', (e: MouseEvent) => {
+            if (e.target === this.modalEl) {
+                this.close();
+            }
+        });
+    }
+
+    submitComment() {
+        if (this.textareaEl) {
+            this.comment = this.textareaEl.value;
+            this.onSubmit(this.comment);
+            this.close();
+        }
     }
 
     onClose() {
@@ -502,6 +563,8 @@ export default class SideNote extends Plugin {
                             sideNoteLeaf.view.updateActiveFile(file);
                         }
                     });
+                    // Refresh editor decorations for the newly active file
+                    this.refreshEditorDecorations();
                 }
             })
         );
@@ -562,6 +625,20 @@ export default class SideNote extends Plugin {
     }
 
     /**
+     * Activate the Side Note view and highlight a specific comment
+     */
+    async activateViewAndHighlightComment(timestamp: number) {
+        await this.activateView();
+        // Find the SideNoteView and highlight the comment
+        const leaves = this.app.workspace.getLeavesOfType("sidenote-view");
+        leaves.forEach(leaf => {
+            if (leaf.view instanceof SideNoteView) {
+                leaf.view.highlightComment(timestamp);
+            }
+        });
+    }
+
+    /**
      * Activate the Side Note view - open it in the right sidebar if not already open
      */
     async activateView() {
@@ -600,6 +677,8 @@ export default class SideNote extends Plugin {
                 leaf.view.renderComments();
             }
         });
+        // Force immediate refresh of editor decorations
+        this.refreshEditorDecorations();
         new Notice(message);
     }
 
@@ -671,11 +750,11 @@ export default class SideNote extends Plugin {
         this.app.workspace.iterateAllLeaves((leaf) => {
             if (leaf.view instanceof MarkdownView) {
                 const editor = leaf.view.editor;
-                // Force editor to refresh by triggering a state update
+                // Force editor to refresh by dispatching the force update effect
                 if (editor && (editor as any).cm) {
                     const cm = (editor as any).cm;
                     if (cm.dispatch) {
-                        cm.dispatch({ effects: [] });
+                        cm.dispatch({ effects: [forceUpdateEffect.of(null)] });
                     }
                 }
             }
@@ -689,13 +768,38 @@ export default class SideNote extends Plugin {
         const plugin = this;
         return ViewPlugin.fromClass(class {
             decorations: DecorationSet;
+            view: EditorView;
 
             constructor(view: EditorView) {
+                this.view = view;
                 this.decorations = this.buildDecorations(view);
+
+                // Add click event listener to handle highlight clicks
+                this.view.dom.addEventListener('click', this.handleClick.bind(this));
+            }
+
+            destroy() {
+                // Clean up event listener
+                this.view.dom.removeEventListener('click', this.handleClick.bind(this));
+            }
+
+            handleClick(event: MouseEvent) {
+                const target = event.target as HTMLElement;
+                // Check if clicked on a highlight
+                const highlight = target.closest('.sidenote-highlight');
+                if (highlight) {
+                    const timestampStr = highlight.getAttribute('data-comment-timestamp');
+                    if (timestampStr) {
+                        const timestamp = parseInt(timestampStr, 10);
+                        // Open sidebar if not open and highlight the comment
+                        plugin.activateViewAndHighlightComment(timestamp);
+                    }
+                }
             }
 
             update(update: ViewUpdate) {
-                if (update.docChanged || update.viewportChanged) {
+                // Rebuild decorations if document changed, viewport changed, or force update effect is present
+                if (update.docChanged || update.viewportChanged || update.transactions.some(tr => tr.effects.some(e => e.is(forceUpdateEffect)))) {
                     this.decorations = this.buildDecorations(update.view);
                 }
             }
@@ -708,11 +812,20 @@ export default class SideNote extends Plugin {
                     return builder.finish();
                 }
 
-                const file = plugin.app.workspace.getActiveFile();
+                // Get the file associated with this specific EditorView
+                let filePath: string | null = null;
+                plugin.app.workspace.iterateAllLeaves((leaf) => {
+                    if (leaf.view instanceof MarkdownView && leaf.view.file) {
+                        const editor = leaf.view.editor;
+                        if (editor && (editor as any).cm === view) {
+                            filePath = leaf.view.file.path;
+                        }
+                    }
+                });
 
-                if (!file) return builder.finish();
+                if (!filePath) return builder.finish();
 
-                const comments = plugin.commentManager.getCommentsForFile(file.path);
+                const comments = plugin.commentManager.getCommentsForFile(filePath);
                 const doc = view.state.doc;
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
 

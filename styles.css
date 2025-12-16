@@ -150,3 +150,14 @@
     background-color: rgba(255, 100, 100, 0.15);
     border-bottom: 2px dashed rgba(255, 100, 100, 0.5);
 }
+
+.sidenote-highlight.orphaned:hover {
+    background-color: rgba(255, 100, 100, 0.25);
+}
+
+/* Active comment in sidebar */
+.sidenote-comment-item.active {
+    background-color: var(--background-modifier-active-hover);
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 0 2px var(--interactive-accent-translucent);
+}

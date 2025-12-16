@@ -12,8 +12,11 @@ SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add 
   - **Split View Mode**: Open comments in a split pane beside your note
 - **Visual Highlights**: Commented text is automatically highlighted in the editor (yellow background with underline)
 - **Auto-Tracking**: Comments automatically follow their text as you edit your notes using hash-based matching
-- **Click to Navigate**: Clicking on a comment automatically scrolls the editor to the corresponding text location
+- **Click to Navigate**:
+  - Click any comment in the side pane to jump to its location in the editor
+  - Click any highlighted text in the editor to open the sidebar and highlight the corresponding comment
 - **Edit and Delete**: Manage your comments directly from the side pane
+- **Keyboard Shortcuts**: Use `Cmd/Ctrl + Enter` to save and close the comment modal, `Esc` to cancel, or click outside the modal to dismiss
 - **Flexible Sorting**: Sort comments by their position in the file or by their creation timestamp
 - **Orphaned Comment Management**: When the original text is deleted, comments are marked as "orphaned" and can be managed separately
 
@@ -36,6 +39,8 @@ SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add 
 2. **Right-click** the selected text and choose "Add comment to selection"
    - Or use the command palette (`Cmd/Ctrl + P`) → "Side Note: Add comment to selection"
 3. Enter your comment in the modal that appears
+   - Press `Cmd/Ctrl + Enter` to save and close
+   - Press `Esc` or click outside the modal to cancel
 4. The text will be automatically highlighted in yellow with an underline
 
 ### Viewing Comments
@@ -52,6 +57,7 @@ SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add 
 ### Navigating Comments
 
 - Click any comment in the side pane to jump to its location in the editor
+- Click any highlighted text in the editor to open the sidebar (if not already open) and highlight the corresponding comment
 - Comments are highlighted directly in the text for easy visual reference
 
 ### Managing Comments
@@ -78,7 +84,9 @@ Access settings via Settings → Side Note:
 
 ### Future Enhancements
 
-**Highlight Variations**: Plans to add customizable highlight colors and styles for different comment types.
+🎨 **Highlight Variations**: Plans to add customizable highlight colors and styles for different comment types.
+
+📝 **Rich Markdown Editor**: Future versions may support storing comments as separate markdown files with full formatting capabilities (links, bold, italic, etc.), allowing for more complex and interconnected annotations. Comments would be stored in a dedicated folder with references in `data.json`.
 
 ## Technical Details
 
@@ -88,6 +96,15 @@ Access settings via Settings → Side Note:
 - Uses CodeMirror 6 decorations for in-editor highlighting
 
 ## Version History
+
+### 1.0.2
+- Added click handler on highlighted text to open sidebar and navigate to comment
+- Added keyboard shortcuts to comment modal:
+  - `Cmd/Ctrl + Enter` to save and close
+  - `Esc` to cancel
+  - Click outside modal to dismiss
+- Fixed bug where highlights didn't appear immediately after adding a comment
+- Added visual feedback when clicking on highlights (comment is highlighted in sidebar)
 
 ### 1.0.1
 - Added hash-based text tracking for robust comment anchoring
