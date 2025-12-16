@@ -1,7 +1,10 @@
-import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField, MarkdownRenderer } from "obsidian";
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
-import { RangeSetBuilder } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect } from "@codemirror/state";
+
+// Define a state effect to trigger decoration updates
+const forceUpdateEffect = StateEffect.define<null>();
 
 interface CustomViewState extends Record<string, unknown> {
     filePath: string | null;
@@ -10,6 +13,7 @@ interface CustomViewState extends Record<string, unknown> {
 interface SideNoteSettings {
     commentSortOrder: "timestamp" | "position";
     showHighlights: boolean;
+    markdownFolder: string;
 }
 
 // Define a new interface for the entire plugin data
@@ -20,11 +24,13 @@ interface PluginData extends SideNoteSettings {
 const DEFAULT_SETTINGS: SideNoteSettings = {
     commentSortOrder: "position",
     showHighlights: true,
+    markdownFolder: "side-note-comments",
 };
 
 class SideNoteView extends ItemView {
     private file: TFile | null = null;
     private plugin: SideNote;
+    private activeCommentTimestamp: number | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: SideNote, file: TFile | null = null) {
         super(leaf);
@@ -73,6 +79,21 @@ class SideNoteView extends ItemView {
         this.renderComments();
     }
 
+    /**
+     * Highlight and scroll to a specific comment
+     */
+    public highlightComment(timestamp: number) {
+        this.activeCommentTimestamp = timestamp;
+        this.renderComments();
+        // Scroll to the highlighted comment
+        setTimeout(() => {
+            const commentEl = this.containerEl.querySelector(`[data-comment-timestamp="${timestamp}"]`);
+            if (commentEl) {
+                commentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 100);
+    }
+
     public renderComments() { // Made public for settings tab to re-render
         this.containerEl.empty();
         this.containerEl.addClass("sidenote-view-container");
@@ -95,6 +116,12 @@ class SideNoteView extends ItemView {
                 const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
                 commentsForFile.forEach((comment) => {
                     const commentEl = commentsContainer.createDiv("sidenote-comment-item");
+                    commentEl.setAttribute("data-comment-timestamp", comment.timestamp.toString());
+
+                    // Highlight active comment
+                    if (this.activeCommentTimestamp === comment.timestamp) {
+                        commentEl.addClass("active");
+                    }
 
                     const headerEl = commentEl.createDiv("sidenote-comment-header");
                     const textInfoEl = headerEl.createDiv("sidenote-comment-text-info");
@@ -186,7 +213,14 @@ class SideNoteView extends ItemView {
                         }
                     };
 
-                    commentEl.createEl("p", { text: comment.comment, cls: "sidenote-comment-content" });
+                    const contentWrapper = commentEl.createDiv({ cls: "sidenote-comment-content" });
+                    // Render markdown for the comment content so formatting is preserved
+                    MarkdownRenderer.renderMarkdown(
+                        comment.comment || "",
+                        contentWrapper,
+                        comment.filePath,
+                        this.plugin
+                    );
 
                     const editButton = actionsEl.createEl("button", { text: "Edit", cls: "sidenote-edit-button" });
                     editButton.onclick = (e) => {
@@ -259,6 +293,7 @@ class CommentModal extends Modal {
     comment: string;
     onSubmit: (comment: string) => void;
     initialComment: string;
+    private textareaEl: HTMLTextAreaElement | null = null;
 
     constructor(app: App, onSubmit: (comment: string) => void, initialComment: string = '') {
         super(app);
@@ -276,19 +311,54 @@ class CommentModal extends Modal {
         const input = inputContainer.createEl("textarea");
         input.placeholder = "Enter your comment...";
         input.value = this.initialComment;
+        this.textareaEl = input;
+
+        // Add keyboard event handlers
+        input.addEventListener('keydown', (e: KeyboardEvent) => {
+            // Cmd/Ctrl + Enter to save
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                this.submitComment();
+            }
+            // Esc to cancel
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                this.close();
+            }
+        });
 
         const footer = contentEl.createDiv("sidenote-modal-footer");
+        const cancelButton = footer.createEl("button", {
+            text: "Cancel"
+        });
+        cancelButton.onclick = () => {
+            this.close();
+        };
+
         const button = footer.createEl("button", {
             text: this.initialComment ? "Save" : "Add",
             cls: "mod-cta"
         });
         button.onclick = () => {
-            this.comment = input.value;
-            this.onSubmit(this.comment);
-            this.close();
+            this.submitComment();
         };
 
         input.focus();
+
+        // Click outside to close (for tablets)
+        this.modalEl.addEventListener('click', (e: MouseEvent) => {
+            if (e.target === this.modalEl) {
+                this.close();
+            }
+        });
+    }
+
+    submitComment() {
+        if (this.textareaEl) {
+            this.comment = this.textareaEl.value;
+            this.onSubmit(this.comment);
+            this.close();
+        }
     }
 
     onClose() {
@@ -342,6 +412,31 @@ class SideNoteSettingTab extends PluginSettingTab {
                     })
             );
 
+        new Setting(containerEl)
+            .setName("Markdown comments folder")
+            .setDesc("Folder (relative to vault) where sidenote markdown backup files are stored")
+            .addText((text) =>
+                text
+                    .setPlaceholder("side-note-comments")
+                    .setValue(this.plugin.settings.markdownFolder || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.markdownFolder = value.trim() || "side-note-comments";
+                        await this.plugin.saveData();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Create Markdown Backup")
+            .setDesc("Export all comments to markdown files in the configured folder")
+            .addButton((button) =>
+                button
+                    .setButtonText("Create Backup")
+                    .onClick(async () => {
+                        await this.plugin.migrateInlineCommentsToMarkdown();
+                        new Notice("Markdown backup created successfully!");
+                    })
+            );
+
         // Orphaned comments management section
         const orphanedCount = this.plugin.commentManager.getOrphanedCommentCount();
 
@@ -377,6 +472,79 @@ export default class SideNote extends Plugin {
     commentManager: CommentManager;
     settings: SideNoteSettings;
     comments: Comment[] = [];
+
+    /** Ensure markdown comment folder exists and return normalized path */
+    private async ensureCommentFolder(): Promise<string> {
+        const folder = this.settings.markdownFolder.trim() || DEFAULT_SETTINGS.markdownFolder;
+        const normalized = folder.replace(/^\/+|\/+$/g, "");
+        const exists = await this.app.vault.adapter.exists(normalized);
+        if (!exists) {
+            await this.app.vault.createFolder(normalized);
+        }
+        return normalized;
+    }
+
+    /** Build side-note file path for a given note */
+    private getSideNoteFilePath(notePath: string): string {
+        const folder = this.settings.markdownFolder.trim() || DEFAULT_SETTINGS.markdownFolder;
+        const normalized = folder.replace(/^\/+|\/+$/g, "");
+        const base = notePath.replace(/\.md$/i, "").replace(/\//g, "__");
+        return `${normalized}/${base}-sidenote.md`;
+    }
+
+    /** Build markdown block with marker */
+    private buildMarkdownBlock(excerpt: string, body: string, timestamp: number): string {
+        const safeExcerpt = excerpt || "(no excerpt)";
+        return `## ${safeExcerpt}\n<!-- side-note:${timestamp} -->\n${body}\n\n---`;
+    }
+
+    /** Write or append comment to markdown file and return path */
+    private async writeCommentToMarkdown(notePath: string, excerpt: string, body: string, timestamp: number): Promise<string> {
+        const folder = await this.ensureCommentFolder();
+        const filePath = this.getSideNoteFilePath(notePath);
+        const block = this.buildMarkdownBlock(excerpt, body, timestamp);
+
+        const existing = this.app.vault.getAbstractFileByPath(filePath);
+        if (existing instanceof TFile) {
+            const content = await this.app.vault.read(existing);
+            const updated = content.trim().length === 0 ? block : `${content}\n\n${block}`;
+            await this.app.vault.modify(existing, updated);
+        } else {
+            const header = `# Side Notes for ${notePath}\n\n`;
+            await this.app.vault.create(filePath, `${header}${block}`);
+        }
+
+        return filePath;
+    }
+
+    /** Update markdown block by timestamp */
+    private async updateMarkdownComment(comment: Comment, newBody: string): Promise<void> {
+        const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) return;
+        const content = await this.app.vault.read(file);
+        const marker = `<!-- side-note:${comment.timestamp} -->`;
+        // Match from heading line through marker and body up to next --- separator or EOF
+        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?=\n---\n|$)`, "m");
+        if (!blockRegex.test(content)) return;
+        const replacement = this.buildMarkdownBlock(comment.selectedText, newBody, comment.timestamp);
+        const updated = content.replace(blockRegex, replacement);
+        await this.app.vault.modify(file, updated);
+    }
+
+    /** Delete markdown block by timestamp */
+    private async deleteMarkdownComment(comment: Comment): Promise<void> {
+        const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) return;
+        const content = await this.app.vault.read(file);
+        const marker = `<!-- side-note:${comment.timestamp} -->`;
+        // Remove the matched block; allow beginning-of-file and Windows newlines
+        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?:\n---\n|$)`, "m");
+        if (!blockRegex.test(content)) return;
+        const updated = content.replace(blockRegex, "").trim();
+        await this.app.vault.modify(file, updated.length ? updated + "\n" : "");
+    }
 
     async onload() {
         await this.loadPluginData(); // Load all data
@@ -502,6 +670,8 @@ export default class SideNote extends Plugin {
                             sideNoteLeaf.view.updateActiveFile(file);
                         }
                     });
+                    // Refresh editor decorations for the newly active file
+                    this.refreshEditorDecorations();
                 }
             })
         );
@@ -562,6 +732,20 @@ export default class SideNote extends Plugin {
     }
 
     /**
+     * Activate the Side Note view and highlight a specific comment
+     */
+    async activateViewAndHighlightComment(timestamp: number) {
+        await this.activateView();
+        // Find the SideNoteView and highlight the comment
+        const leaves = this.app.workspace.getLeavesOfType("sidenote-view");
+        leaves.forEach(leaf => {
+            if (leaf.view instanceof SideNoteView) {
+                leaf.view.highlightComment(timestamp);
+            }
+        });
+    }
+
+    /**
      * Activate the Side Note view - open it in the right sidebar if not already open
      */
     async activateView() {
@@ -600,20 +784,25 @@ export default class SideNote extends Plugin {
                 leaf.view.renderComments();
             }
         });
+        // Force immediate refresh of editor decorations
+        this.refreshEditorDecorations();
         new Notice(message);
     }
 
-    addComment(newComment: Comment) {
+    async addComment(newComment: Comment) {
         this.commentManager.addComment(newComment);
         void this.onCommentsChanged("Comment added!");
     }
 
-    editComment(timestamp: number, newCommentText: string) {
-        this.commentManager.editComment(timestamp, newCommentText);
+    async editComment(timestamp: number, newCommentText: string) {
+        const existing = this.commentManager.getComments().find(c => c.timestamp === timestamp);
+        if (existing) {
+            existing.comment = newCommentText;
+        }
         void this.onCommentsChanged("Comment updated!");
     }
 
-    deleteComment(timestamp: number) {
+    async deleteComment(timestamp: number) {
         this.commentManager.deleteComment(timestamp);
         void this.onCommentsChanged("Comment deleted!");
     }
@@ -623,6 +812,7 @@ export default class SideNote extends Plugin {
         this.settings = {
             commentSortOrder: loadedData.commentSortOrder || DEFAULT_SETTINGS.commentSortOrder,
             showHighlights: loadedData.showHighlights !== undefined ? loadedData.showHighlights : DEFAULT_SETTINGS.showHighlights,
+            markdownFolder: loadedData.markdownFolder || DEFAULT_SETTINGS.markdownFolder,
         };
         this.comments = loadedData.comments || [];
     }
@@ -654,6 +844,23 @@ export default class SideNote extends Plugin {
         }
     }
 
+    /**
+     * Export existing inline comments to markdown files
+     */
+    async migrateInlineCommentsToMarkdown() {
+        let changed = false;
+        for (const comment of this.comments) {
+            if (!comment.commentPath) {
+                const path = await this.writeCommentToMarkdown(comment.filePath, comment.selectedText, comment.comment, comment.timestamp);
+                comment.commentPath = path;
+                changed = true;
+            }
+        }
+        if (changed) {
+            await this.saveData();
+        }
+    }
+
     async saveData() {
         const dataToSave: PluginData = {
             ...this.settings,
@@ -671,11 +878,11 @@ export default class SideNote extends Plugin {
         this.app.workspace.iterateAllLeaves((leaf) => {
             if (leaf.view instanceof MarkdownView) {
                 const editor = leaf.view.editor;
-                // Force editor to refresh by triggering a state update
+                // Force editor to refresh by dispatching the force update effect
                 if (editor && (editor as any).cm) {
                     const cm = (editor as any).cm;
                     if (cm.dispatch) {
-                        cm.dispatch({ effects: [] });
+                        cm.dispatch({ effects: [forceUpdateEffect.of(null)] });
                     }
                 }
             }
@@ -689,13 +896,38 @@ export default class SideNote extends Plugin {
         const plugin = this;
         return ViewPlugin.fromClass(class {
             decorations: DecorationSet;
+            view: EditorView;
 
             constructor(view: EditorView) {
+                this.view = view;
                 this.decorations = this.buildDecorations(view);
+
+                // Add click event listener to handle highlight clicks
+                this.view.dom.addEventListener('click', this.handleClick.bind(this));
+            }
+
+            destroy() {
+                // Clean up event listener
+                this.view.dom.removeEventListener('click', this.handleClick.bind(this));
+            }
+
+            handleClick(event: MouseEvent) {
+                const target = event.target as HTMLElement;
+                // Check if clicked on a highlight
+                const highlight = target.closest('.sidenote-highlight');
+                if (highlight) {
+                    const timestampStr = highlight.getAttribute('data-comment-timestamp');
+                    if (timestampStr) {
+                        const timestamp = parseInt(timestampStr, 10);
+                        // Open sidebar if not open and highlight the comment
+                        plugin.activateViewAndHighlightComment(timestamp);
+                    }
+                }
             }
 
             update(update: ViewUpdate) {
-                if (update.docChanged || update.viewportChanged) {
+                // Rebuild decorations if document changed, viewport changed, or force update effect is present
+                if (update.docChanged || update.viewportChanged || update.transactions.some(tr => tr.effects.some(e => e.is(forceUpdateEffect)))) {
                     this.decorations = this.buildDecorations(update.view);
                 }
             }
@@ -708,11 +940,20 @@ export default class SideNote extends Plugin {
                     return builder.finish();
                 }
 
-                const file = plugin.app.workspace.getActiveFile();
+                // Get the file associated with this specific EditorView
+                let filePath: string | null = null;
+                plugin.app.workspace.iterateAllLeaves((leaf) => {
+                    if (leaf.view instanceof MarkdownView && leaf.view.file) {
+                        const editor = leaf.view.editor;
+                        if (editor && (editor as any).cm === view) {
+                            filePath = leaf.view.file.path;
+                        }
+                    }
+                });
 
-                if (!file) return builder.finish();
+                if (!filePath) return builder.finish();
 
-                const comments = plugin.commentManager.getCommentsForFile(file.path);
+                const comments = plugin.commentManager.getCommentsForFile(filePath);
                 const doc = view.state.doc;
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
 

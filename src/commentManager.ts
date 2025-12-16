@@ -11,6 +11,7 @@ export interface Comment {
     comment: string;
     timestamp: number;
     isOrphaned?: boolean;
+    commentPath?: string; // Path to markdown-stored comment (optional)
 }
 
 export class CommentManager {
