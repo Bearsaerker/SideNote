@@ -30,6 +30,7 @@ SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add 
 - **Proximity-Based Selection**: When duplicate text exists, the system selects the match closest to the original position
 - **Active File Auto-Update**: When using sidebar mode, the comment view automatically updates as you switch between files
 - **Orphaned Comment Highlighting**: Deleted text locations are marked with a single red character (can be toggled off in settings)
+- **Optional Markdown Storage**: Store comments in per-note sidenote markdown files located in a configurable folder (defaults to `side-note-comments`)
 
 ## How to Use
 
@@ -72,6 +73,8 @@ Access settings via Settings → Side Note:
 
 - **Comment Sort Order**: Choose between position in file or timestamp
 - **Show Highlights in Editor**: Toggle visual highlights on/off
+- **Store Comments as Markdown Files**: Save comments into per-note sidenote markdown files
+- **Markdown Comments Folder**: Configure the folder (relative to vault) for sidenote markdown files
 - **Orphaned Comments**: View count and delete orphaned comments in bulk
 
 ## Important Notes
@@ -84,9 +87,9 @@ Access settings via Settings → Side Note:
 
 ### Future Enhancements
 
-🎨 **Highlight Variations**: Plans to add customizable highlight colors and styles for different comment types.
+**Highlight Variations**: Plans to add customizable highlight colors and styles for different comment types.
 
-📝 **Rich Markdown Editor**: Future versions may support storing comments as separate markdown files with full formatting capabilities (links, bold, italic, etc.), allowing for more complex and interconnected annotations. Comments would be stored in a dedicated folder with references in `data.json`.
+**Richer Editing UI**: Build a richer Markdown editing experience (shortcuts/preview) on top of the new markdown storage option.
 
 ## Technical Details
 
@@ -105,6 +108,10 @@ Access settings via Settings → Side Note:
   - Click outside modal to dismiss
 - Fixed bug where highlights didn't appear immediately after adding a comment
 - Added visual feedback when clicking on highlights (comment is highlighted in sidebar)
+- Added optional markdown storage for comments (per-note sidenote files in configurable folder)
+- Added inline→markdown migration when enabling markdown storage
+- Renamed sidenote files automatically on note rename and kept references in sync
+- Fixed highlight positioning when multiple editors are open for different files
 
 ### 1.0.1
 - Added hash-based text tracking for robust comment anchoring

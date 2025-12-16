@@ -1,7 +1,7 @@
-import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField, MarkdownRenderer } from "obsidian";
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
-import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 
 // Define a state effect to trigger decoration updates
 const forceUpdateEffect = StateEffect.define<null>();
@@ -13,6 +13,7 @@ interface CustomViewState extends Record<string, unknown> {
 interface SideNoteSettings {
     commentSortOrder: "timestamp" | "position";
     showHighlights: boolean;
+    markdownFolder: string;
 }
 
 // Define a new interface for the entire plugin data
@@ -23,6 +24,7 @@ interface PluginData extends SideNoteSettings {
 const DEFAULT_SETTINGS: SideNoteSettings = {
     commentSortOrder: "position",
     showHighlights: true,
+    markdownFolder: "side-note-comments",
 };
 
 class SideNoteView extends ItemView {
@@ -211,7 +213,14 @@ class SideNoteView extends ItemView {
                         }
                     };
 
-                    commentEl.createEl("p", { text: comment.comment, cls: "sidenote-comment-content" });
+                    const contentWrapper = commentEl.createDiv({ cls: "sidenote-comment-content" });
+                    // Render markdown for the comment content so formatting is preserved
+                    MarkdownRenderer.renderMarkdown(
+                        comment.comment || "",
+                        contentWrapper,
+                        comment.filePath,
+                        this.plugin
+                    );
 
                     const editButton = actionsEl.createEl("button", { text: "Edit", cls: "sidenote-edit-button" });
                     editButton.onclick = (e) => {
@@ -403,6 +412,31 @@ class SideNoteSettingTab extends PluginSettingTab {
                     })
             );
 
+        new Setting(containerEl)
+            .setName("Markdown comments folder")
+            .setDesc("Folder (relative to vault) where sidenote markdown backup files are stored")
+            .addText((text) =>
+                text
+                    .setPlaceholder("side-note-comments")
+                    .setValue(this.plugin.settings.markdownFolder || "")
+                    .onChange(async (value) => {
+                        this.plugin.settings.markdownFolder = value.trim() || "side-note-comments";
+                        await this.plugin.saveData();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Create Markdown Backup")
+            .setDesc("Export all comments to markdown files in the configured folder")
+            .addButton((button) =>
+                button
+                    .setButtonText("Create Backup")
+                    .onClick(async () => {
+                        await this.plugin.migrateInlineCommentsToMarkdown();
+                        new Notice("Markdown backup created successfully!");
+                    })
+            );
+
         // Orphaned comments management section
         const orphanedCount = this.plugin.commentManager.getOrphanedCommentCount();
 
@@ -438,6 +472,79 @@ export default class SideNote extends Plugin {
     commentManager: CommentManager;
     settings: SideNoteSettings;
     comments: Comment[] = [];
+
+    /** Ensure markdown comment folder exists and return normalized path */
+    private async ensureCommentFolder(): Promise<string> {
+        const folder = this.settings.markdownFolder.trim() || DEFAULT_SETTINGS.markdownFolder;
+        const normalized = folder.replace(/^\/+|\/+$/g, "");
+        const exists = await this.app.vault.adapter.exists(normalized);
+        if (!exists) {
+            await this.app.vault.createFolder(normalized);
+        }
+        return normalized;
+    }
+
+    /** Build side-note file path for a given note */
+    private getSideNoteFilePath(notePath: string): string {
+        const folder = this.settings.markdownFolder.trim() || DEFAULT_SETTINGS.markdownFolder;
+        const normalized = folder.replace(/^\/+|\/+$/g, "");
+        const base = notePath.replace(/\.md$/i, "").replace(/\//g, "__");
+        return `${normalized}/${base}-sidenote.md`;
+    }
+
+    /** Build markdown block with marker */
+    private buildMarkdownBlock(excerpt: string, body: string, timestamp: number): string {
+        const safeExcerpt = excerpt || "(no excerpt)";
+        return `## ${safeExcerpt}\n<!-- side-note:${timestamp} -->\n${body}\n\n---`;
+    }
+
+    /** Write or append comment to markdown file and return path */
+    private async writeCommentToMarkdown(notePath: string, excerpt: string, body: string, timestamp: number): Promise<string> {
+        const folder = await this.ensureCommentFolder();
+        const filePath = this.getSideNoteFilePath(notePath);
+        const block = this.buildMarkdownBlock(excerpt, body, timestamp);
+
+        const existing = this.app.vault.getAbstractFileByPath(filePath);
+        if (existing instanceof TFile) {
+            const content = await this.app.vault.read(existing);
+            const updated = content.trim().length === 0 ? block : `${content}\n\n${block}`;
+            await this.app.vault.modify(existing, updated);
+        } else {
+            const header = `# Side Notes for ${notePath}\n\n`;
+            await this.app.vault.create(filePath, `${header}${block}`);
+        }
+
+        return filePath;
+    }
+
+    /** Update markdown block by timestamp */
+    private async updateMarkdownComment(comment: Comment, newBody: string): Promise<void> {
+        const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) return;
+        const content = await this.app.vault.read(file);
+        const marker = `<!-- side-note:${comment.timestamp} -->`;
+        // Match from heading line through marker and body up to next --- separator or EOF
+        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?=\n---\n|$)`, "m");
+        if (!blockRegex.test(content)) return;
+        const replacement = this.buildMarkdownBlock(comment.selectedText, newBody, comment.timestamp);
+        const updated = content.replace(blockRegex, replacement);
+        await this.app.vault.modify(file, updated);
+    }
+
+    /** Delete markdown block by timestamp */
+    private async deleteMarkdownComment(comment: Comment): Promise<void> {
+        const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) return;
+        const content = await this.app.vault.read(file);
+        const marker = `<!-- side-note:${comment.timestamp} -->`;
+        // Remove the matched block; allow beginning-of-file and Windows newlines
+        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?:\n---\n|$)`, "m");
+        if (!blockRegex.test(content)) return;
+        const updated = content.replace(blockRegex, "").trim();
+        await this.app.vault.modify(file, updated.length ? updated + "\n" : "");
+    }
 
     async onload() {
         await this.loadPluginData(); // Load all data
@@ -682,17 +789,20 @@ export default class SideNote extends Plugin {
         new Notice(message);
     }
 
-    addComment(newComment: Comment) {
+    async addComment(newComment: Comment) {
         this.commentManager.addComment(newComment);
         void this.onCommentsChanged("Comment added!");
     }
 
-    editComment(timestamp: number, newCommentText: string) {
-        this.commentManager.editComment(timestamp, newCommentText);
+    async editComment(timestamp: number, newCommentText: string) {
+        const existing = this.commentManager.getComments().find(c => c.timestamp === timestamp);
+        if (existing) {
+            existing.comment = newCommentText;
+        }
         void this.onCommentsChanged("Comment updated!");
     }
 
-    deleteComment(timestamp: number) {
+    async deleteComment(timestamp: number) {
         this.commentManager.deleteComment(timestamp);
         void this.onCommentsChanged("Comment deleted!");
     }
@@ -702,6 +812,7 @@ export default class SideNote extends Plugin {
         this.settings = {
             commentSortOrder: loadedData.commentSortOrder || DEFAULT_SETTINGS.commentSortOrder,
             showHighlights: loadedData.showHighlights !== undefined ? loadedData.showHighlights : DEFAULT_SETTINGS.showHighlights,
+            markdownFolder: loadedData.markdownFolder || DEFAULT_SETTINGS.markdownFolder,
         };
         this.comments = loadedData.comments || [];
     }
@@ -730,6 +841,23 @@ export default class SideNote extends Plugin {
         if (needsSave) {
             await this.saveData();
             console.log("Migrated comments: added hashes and initialized flags");
+        }
+    }
+
+    /**
+     * Export existing inline comments to markdown files
+     */
+    async migrateInlineCommentsToMarkdown() {
+        let changed = false;
+        for (const comment of this.comments) {
+            if (!comment.commentPath) {
+                const path = await this.writeCommentToMarkdown(comment.filePath, comment.selectedText, comment.comment, comment.timestamp);
+                comment.commentPath = path;
+                changed = true;
+            }
+        }
+        if (changed) {
+            await this.saveData();
         }
     }
 
