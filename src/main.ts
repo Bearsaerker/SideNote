@@ -3,6 +3,35 @@ import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 
+// Helper function to generate SHA256 hash using Web Crypto API (works on mobile)
+async function generateHash(text: string): Promise<string> {
+    try {
+        // Try Web Crypto API first (works on mobile)
+        const encoder = new TextEncoder();
+        const data = encoder.encode(text);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        return hashHex;
+    } catch (error) {
+        // Fallback to Node.js crypto for desktop
+        try {
+            const nodeCrypto = require('crypto');
+            return nodeCrypto.createHash('sha256').update(text).digest('hex');
+        } catch {
+            // If all fails, return a simple hash
+            new Notice("Warning: Could not generate proper hash, using fallback");
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return Math.abs(hash).toString(16);
+        }
+    }
+}
+
 // Define a state effect to trigger decoration updates
 const forceUpdateEffect = StateEffect.define<null>();
 
@@ -14,6 +43,8 @@ interface SideNoteSettings {
     commentSortOrder: "timestamp" | "position";
     showHighlights: boolean;
     markdownFolder: string;
+    highlightColor: string;
+    highlightOpacity: number;
 }
 
 // Define a new interface for the entire plugin data
@@ -25,6 +56,8 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
     commentSortOrder: "position",
     showHighlights: true,
     markdownFolder: "side-note-comments",
+    highlightColor: "#FFC800",
+    highlightOpacity: 0.2,
 };
 
 class SideNoteView extends ItemView {
@@ -222,19 +255,35 @@ class SideNoteView extends ItemView {
                         this.plugin
                     );
 
-                    const editButton = actionsEl.createEl("button", { text: "Edit", cls: "sidenote-edit-button" });
-                    editButton.onclick = (e) => {
-                        e.stopPropagation(); // Prevent the comment item's click event
+                    // Create menu button for mobile
+                    const menuButton = actionsEl.createEl("button", { text: "...", cls: "sidenote-menu-button" });
+                    const menuContainer = actionsEl.createDiv("sidenote-action-menu");
+
+                    const editOption = menuContainer.createEl("button", { text: "Edit", cls: "sidenote-menu-option sidenote-menu-edit" });
+                    editOption.onclick = (e) => {
+                        e.stopPropagation();
+                        menuContainer.classList.remove("visible");
                         new CommentModal(this.app, (editedComment) => {
                             this.plugin.editComment(comment.timestamp, editedComment);
                         }, comment.comment).open();
                     };
 
-                    const deleteButton = actionsEl.createEl("button", { text: "Delete", cls: "sidenote-delete-button" });
-                    deleteButton.onclick = (e) => {
-                        e.stopPropagation(); // Prevent the comment item's click event
+                    const deleteOption = menuContainer.createEl("button", { text: "Delete", cls: "sidenote-menu-option sidenote-menu-delete" });
+                    deleteOption.onclick = (e) => {
+                        e.stopPropagation();
+                        menuContainer.classList.remove("visible");
                         this.plugin.deleteComment(comment.timestamp);
                     };
+
+                    menuButton.onclick = (e) => {
+                        e.stopPropagation();
+                        menuContainer.classList.toggle("visible");
+                    };
+
+                    // Close menu when clicking outside
+                    document.addEventListener("click", () => {
+                        menuContainer.classList.remove("visible");
+                    });
                 });
             } else {
                 const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
@@ -311,11 +360,12 @@ class CommentModal extends Modal {
         const input = inputContainer.createEl("textarea");
         input.placeholder = "Enter your comment...";
         input.value = this.initialComment;
+        input.classList.add("sidenote-textarea");
         this.textareaEl = input;
 
         // Add keyboard event handlers
         input.addEventListener('keydown', (e: KeyboardEvent) => {
-            // Cmd/Ctrl + Enter to save
+            // Cmd/Ctrl + Enter to save (for desktop/laptop users)
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault();
                 this.submitComment();
@@ -329,21 +379,62 @@ class CommentModal extends Modal {
 
         const footer = contentEl.createDiv("sidenote-modal-footer");
         const cancelButton = footer.createEl("button", {
-            text: "Cancel"
+            text: "Cancel",
+            cls: "sidenote-modal-cancel-btn"
         });
-        cancelButton.onclick = () => {
+
+        const handleCancel = () => {
             this.close();
         };
 
+        // Use both event handlers for maximum compatibility
+        cancelButton.onclick = handleCancel;
+        cancelButton.addEventListener('click', handleCancel, false);
+        cancelButton.addEventListener('touchstart', (e: TouchEvent) => {
+            e.preventDefault();
+        }, false);
+        cancelButton.addEventListener('touchend', (e: TouchEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleCancel();
+        }, false);
+
         const button = footer.createEl("button", {
             text: this.initialComment ? "Save" : "Add",
-            cls: "mod-cta"
+            cls: "mod-cta sidenote-modal-submit-btn"
         });
-        button.onclick = () => {
-            this.submitComment();
+
+        // Prevent focus on button
+        button.setAttribute('type', 'button');
+
+        const handleSubmit = async () => {
+            // Blur the input to hide keyboard
+            if (this.textareaEl) {
+                this.textareaEl.blur();
+            }
+            await this.submitComment();
         };
 
-        input.focus();
+        // Use both event handlers for maximum compatibility
+        button.onclick = handleSubmit;
+        button.addEventListener('click', handleSubmit, false);
+        button.addEventListener('touchstart', (e: TouchEvent) => {
+            e.preventDefault();
+        }, false);
+        button.addEventListener('touchend', (e: TouchEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            handleSubmit();
+        }, false);
+
+        // Set focus after short delay to ensure modal is fully rendered
+        setTimeout(() => {
+            input.focus();
+            // On mobile, scroll to the textarea to ensure it's visible
+            if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+                input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 100);
 
         // Click outside to close (for tablets)
         this.modalEl.addEventListener('click', (e: MouseEvent) => {
@@ -351,19 +442,32 @@ class CommentModal extends Modal {
                 this.close();
             }
         });
+
+        // Prevent body scroll when modal is open on mobile
+        document.body.style.overflow = 'hidden';
     }
 
-    submitComment() {
+    async submitComment() {
         if (this.textareaEl) {
             this.comment = this.textareaEl.value;
-            this.onSubmit(this.comment);
+            try {
+                this.onSubmit(this.comment);
+            } catch (error) {
+                new Notice("Error: Failed to save comment");
+                console.error("Error in onSubmit:", error);
+                return;
+            }
             this.close();
+        } else {
+            new Notice("Error: Comment field is empty");
         }
     }
 
     onClose() {
         const { contentEl } = this;
         contentEl.empty();
+        // Restore body scroll
+        document.body.style.overflow = '';
     }
 }
 
@@ -409,6 +513,35 @@ class SideNoteSettingTab extends PluginSettingTab {
                         await this.plugin.saveData();
                         // Refresh editor decorations
                         this.plugin.refreshEditorDecorations();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Highlight color")
+            .setDesc("Choose the color for highlighted comments in the editor")
+            .addColorPicker((colorPicker) =>
+                colorPicker
+                    .setValue(this.plugin.settings.highlightColor || "#FFC800")
+                    .onChange(async (value: string) => {
+                        this.plugin.settings.highlightColor = value;
+                        await this.plugin.saveData();
+                        // Apply color changes immediately
+                        this.plugin.applyHighlightColor();
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Highlight opacity")
+            .setDesc("Set the transparency of the highlight (0 = transparent, 1 = opaque)")
+            .addSlider((slider) =>
+                slider
+                    .setLimits(0, 1, 0.1)
+                    .setValue(this.plugin.settings.highlightOpacity || 0.2)
+                    .onChange(async (value: number) => {
+                        this.plugin.settings.highlightOpacity = value;
+                        await this.plugin.saveData();
+                        // Apply opacity changes immediately
+                        this.plugin.applyHighlightColor();
                     })
             );
 
@@ -579,37 +712,33 @@ export default class SideNote extends Plugin {
         this.addCommand({
             id: "add-comment-to-selection",
             name: "Add comment to selection",
-            callback: () => {
-                const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-                if (activeView) {
-                    const editor = activeView.editor;
-                    const selection = editor.getSelection();
-                    const cursorStart = editor.getCursor("from");
-                    const cursorEnd = editor.getCursor("to");
-                    const filePath = activeView.file?.path;
+            icon: "message-square",
+            editorCallback: async (editor, view) => {
+                const selection = editor.getSelection();
+                const cursorStart = editor.getCursor("from");
+                const cursorEnd = editor.getCursor("to");
+                const filePath = view.file?.path;
 
-                    if (selection && filePath) {
-                        new CommentModal(this.app, (comment) => {
-                            const crypto = require('crypto');
-                            const newComment: Comment = {
-                                filePath: filePath,
-                                startLine: cursorStart.line,
-                                startChar: cursorStart.ch,
-                                endLine: cursorEnd.line,
-                                endChar: cursorEnd.ch,
-                                selectedText: selection,
-                                selectedTextHash: crypto.createHash('sha256').update(selection).digest('hex'),
-                                comment: comment,
-                                timestamp: Date.now(),
-                                isOrphaned: false,
-                            };
-                            this.addComment(newComment);
-                        }).open();
-                    } else {
-                        new Notice("No text selected or file not found.");
-                    }
+                // Validate selection exists and has content
+                if (selection && selection.trim().length > 0 && filePath) {
+                    new CommentModal(this.app, async (comment) => {
+                        const selectedTextHash = await generateHash(selection);
+                        const newComment: Comment = {
+                            filePath: filePath,
+                            startLine: cursorStart.line,
+                            startChar: cursorStart.ch,
+                            endLine: cursorEnd.line,
+                            endChar: cursorEnd.ch,
+                            selectedText: selection,
+                            selectedTextHash: selectedTextHash,
+                            comment: comment,
+                            timestamp: Date.now(),
+                            isOrphaned: false,
+                        };
+                        this.addComment(newComment);
+                    }).open();
                 } else {
-                    new Notice("No active Markdown view found.");
+                    new Notice("Please select some text to add a comment.");
                 }
             },
         });
@@ -622,15 +751,16 @@ export default class SideNote extends Plugin {
                     menu.addItem((item) => {
                         item.setTitle("Add comment to selection")
                             .setIcon("message-square")
-                            .onClick(() => {
+                            .onClick(async () => {
                                 const selection = editor.getSelection();
                                 const cursorStart = editor.getCursor("from");
                                 const cursorEnd = editor.getCursor("to");
                                 const filePath = view.file?.path;
 
-                                if (selection && filePath) {
-                                    new CommentModal(this.app, (comment) => {
-                                        const crypto = require('crypto');
+                                // Validate selection has content
+                                if (selection && selection.trim().length > 0 && filePath) {
+                                    new CommentModal(this.app, async (comment) => {
+                                        const selectedTextHash = await generateHash(selection);
                                         const newComment: Comment = {
                                             filePath: filePath,
                                             startLine: cursorStart.line,
@@ -638,7 +768,7 @@ export default class SideNote extends Plugin {
                                             endLine: cursorEnd.line,
                                             endChar: cursorEnd.ch,
                                             selectedText: selection,
-                                            selectedTextHash: crypto.createHash('sha256').update(selection).digest('hex'),
+                                            selectedTextHash: selectedTextHash,
                                             comment: comment,
                                             timestamp: Date.now(),
                                             isOrphaned: false,
@@ -646,7 +776,7 @@ export default class SideNote extends Plugin {
                                         this.addComment(newComment);
                                     }).open();
                                 } else {
-                                    new Notice("No text selected or file not found.");
+                                    new Notice("Please select some text to add a comment.");
                                 }
                             });
                     });
@@ -813,8 +943,12 @@ export default class SideNote extends Plugin {
             commentSortOrder: loadedData.commentSortOrder || DEFAULT_SETTINGS.commentSortOrder,
             showHighlights: loadedData.showHighlights !== undefined ? loadedData.showHighlights : DEFAULT_SETTINGS.showHighlights,
             markdownFolder: loadedData.markdownFolder || DEFAULT_SETTINGS.markdownFolder,
+            highlightColor: loadedData.highlightColor || DEFAULT_SETTINGS.highlightColor,
+            highlightOpacity: loadedData.highlightOpacity !== undefined ? loadedData.highlightOpacity : DEFAULT_SETTINGS.highlightOpacity,
         };
         this.comments = loadedData.comments || [];
+        // Apply highlight color on load
+        this.applyHighlightColor();
     }
 
     /**
@@ -823,20 +957,18 @@ export default class SideNote extends Plugin {
     async migrateComments() {
         let needsSave = false;
 
-        this.comments.forEach(comment => {
+        for (const comment of this.comments) {
             // Add missing selectedTextHash
             if (!comment.selectedTextHash && comment.selectedText) {
-                const crypto = require('crypto');
-                comment.selectedTextHash = crypto.createHash('sha256').update(comment.selectedText).digest('hex');
+                comment.selectedTextHash = await generateHash(comment.selectedText);
                 needsSave = true;
             }
-
             // Initialize isOrphaned flag if not present
             if (comment.isOrphaned === undefined) {
                 comment.isOrphaned = false;
                 needsSave = true;
             }
-        });
+        }
 
         if (needsSave) {
             await this.saveData();
@@ -859,6 +991,47 @@ export default class SideNote extends Plugin {
         if (changed) {
             await this.saveData();
         }
+    }
+
+    /**
+     * Apply highlight color settings by updating CSS variables
+     */
+    applyHighlightColor() {
+        const root = document.documentElement;
+        const color = this.settings.highlightColor;
+        const opacity = this.settings.highlightOpacity;
+
+        // Convert hex to RGB
+        const rgb = this.hexToRgb(color);
+        const rgbaColor = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${opacity})`;
+        const rgbaHoverColor = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${Math.min(opacity + 0.15, 1)})`; // Darker on hover
+        const rgbaBorderColor = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${Math.min(opacity + 0.4, 1)})`; // Darker for border
+        const rgbaOrphaned = `rgba(255, 100, 100, ${opacity})`; // Red tone for orphaned
+        const rgbaOrphanedHover = `rgba(255, 100, 100, ${Math.min(opacity + 0.15, 1)})`; // Darker on hover
+        const rgbaOrphanedBorder = `rgba(255, 100, 100, ${Math.min(opacity + 0.35, 1)})`; // Darker for orphaned border
+
+        // Set CSS variables
+        root.style.setProperty('--sidenote-highlight-color', rgbaColor);
+        root.style.setProperty('--sidenote-highlight-hover', rgbaHoverColor);
+        root.style.setProperty('--sidenote-highlight-border', rgbaBorderColor);
+        root.style.setProperty('--sidenote-orphaned-color', rgbaOrphaned);
+        root.style.setProperty('--sidenote-orphaned-hover', rgbaOrphanedHover);
+        root.style.setProperty('--sidenote-orphaned-border', rgbaOrphanedBorder);
+
+        // Refresh editor decorations to apply new colors
+        this.refreshEditorDecorations();
+    }
+
+    /**
+     * Convert hex color to RGB object
+     */
+    hexToRgb(hex: string): { r: number; g: number; b: number } {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16)
+        } : { r: 255, g: 200, b: 0 }; // Default to yellow if invalid
     }
 
     async saveData() {

@@ -77,6 +77,63 @@ Access settings via Settings → Side Note:
 - **Markdown Comments Folder**: Configure the folder (relative to vault) for sidenote markdown files
 - **Orphaned Comments**: View count and delete orphaned comments in bulk
 
+## Mobile Support
+
+**SideNote v1.0.3 and later** includes full mobile support for both iOS (Obsidian mobile app) and Android devices!
+
+### Mobile Features
+
+- **Responsive Design**: The comment modal automatically adapts to mobile screen sizes
+- **Touch-Friendly Buttons**: All buttons have proper touch target sizes (44px minimum) for easy tapping
+- **Mobile Keyboard Optimization**: Text input is optimized for mobile keyboards with 16px font size to prevent auto-zoom on iOS
+- **Improved Focus Management**: Better focus handling for seamless modal interaction on touch devices
+- **Text Selection Support**: Full support for selecting and commenting on text in mobile editors
+
+### How to Add Comments on Mobile
+
+1. Open a note in edit mode
+2. **Long-press** the text you want to comment on and drag to select it
+   - Start by long-pressing at the beginning of the text and drag to the end
+3. Tap the **message icon (💬)** in the **editor toolbar** at the top
+   - If you don't see the icon, swipe left or right on the toolbar to find it
+4. Enter your comment in the modal that appears
+5. Tap the **Add** button to save
+
+### How to View Comments on Mobile
+
+#### **Open Comments in Sidebar**
+
+**iOS (Obsidian iOS app):**
+1. Tap the hamburger menu (≡) at the top left
+2. Swipe right or run the "Open in Sidebar" command
+3. Comments list will appear in the sidebar
+
+**Android (Obsidian Android app):**
+1. Tap the menu icon (≡) at the top of the screen
+2. Run the "Side Note: Open in Sidebar" command (search for it)
+3. Comments list will appear in the right panel
+
+#### **Open from Command Palette**
+
+1. Tap the menu icon (≡ or ⋮) at the top of the screen
+2. Open the command palette
+3. Search for "side note"
+4. Tap "Side Note: Open in Sidebar"
+5. The sidebar will open showing all comments for the current note
+
+### Interacting with Comments
+
+- Tap any comment in the sidebar to jump to that location in the editor
+- Tap the **edit (pencil)** icon next to a comment to edit it
+- Tap the **delete (trash)** icon next to a comment to delete it
+
+### Troubleshooting Mobile Issues
+
+- **Message icon not visible in toolbar**: Swipe left or right on the toolbar to find it. You can customize the mobile toolbar in Obsidian's settings.
+- **"Add" button not responding**: Make sure to tap the button firmly. Verify that you've entered text in the comment field (empty comments cannot be saved).
+- **Text selection difficult**: Try selecting a longer text span (10+ characters) for more reliable matching.
+- **Sidebar won't display**: Open the command palette from the menu (≡) at the top and run "Side Note: Open in Sidebar".
+
 ## Important Notes
 
 ### Text Tracking Limitations
@@ -99,6 +156,17 @@ Access settings via Settings → Side Note:
 - Uses CodeMirror 6 decorations for in-editor highlighting
 
 ## Version History
+
+### 1.0.3
+- **Added full mobile support** for iOS and Android devices
+- **Added comment button to mobile editor toolbar** (message icon) for easy access
+- Improved comment modal with better focus management
+- Added mobile-responsive CSS for touch-friendly interfaces
+- Enhanced text selection validation for better error messages
+- Optimized keyboard handling for mobile devices
+- Increased button touch target sizes (44px) for better mobile usability
+- Fixed modal scrolling and visibility issues on mobile
+- Added font-size optimization (16px) to prevent iOS auto-zoom
 
 ### 1.0.2
 - Added click handler on highlighted text to open sidebar and navigate to comment
