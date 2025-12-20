@@ -108,6 +108,7 @@
     display: flex;
     gap: 8px;
     flex-shrink: 0;
+    position: relative;
 }
 
 .sidenote-comment-actions button {
@@ -123,6 +124,72 @@
 .sidenote-comment-actions button:hover {
     background-color: var(--background-modifier-hover);
     color: var(--text-accent);
+}
+
+/* Menu button styles */
+.sidenote-menu-button {
+    padding: 4px 8px !important;
+    font-size: 18px !important;
+    font-weight: bold;
+    min-width: 24px;
+    height: 24px;
+}
+
+/* Action menu dropdown */
+.sidenote-action-menu {
+    position: absolute;
+    top: 30px;
+    right: 8px;
+    background-color: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    min-width: 120px;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-5px);
+    transition: opacity 0.2s, transform 0.2s;
+    z-index: 100;
+}
+
+.sidenote-action-menu.visible {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.sidenote-menu-option {
+    padding: 10px 16px !important;
+    background: none !important;
+    border: none !important;
+    color: var(--text-normal);
+    text-align: left;
+    cursor: pointer;
+    font-size: 14px !important;
+    transition: background-color 0.2s;
+    border-radius: 0 !important;
+}
+
+.sidenote-menu-option:first-child {
+    border-radius: 6px 6px 0 0;
+}
+
+.sidenote-menu-option:last-child {
+    border-radius: 0 0 6px 6px;
+}
+
+.sidenote-menu-option:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.sidenote-menu-edit {
+    color: var(--text-accent);
+}
+
+.sidenote-menu-delete {
+    color: var(--text-error, #ff4444);
 }
 
 .sidenote-empty-state {
@@ -142,23 +209,23 @@
 
 /* Highlight styles for comments in editor */
 .sidenote-highlight {
-    background-color: rgba(255, 200, 0, 0.2);
-    border-bottom: 2px solid rgba(255, 200, 0, 0.6);
+    background-color: var(--sidenote-highlight-color, rgba(255, 200, 0, 0.2));
+    border-bottom: 2px solid var(--sidenote-highlight-border, rgba(255, 200, 0, 0.6));
     cursor: pointer;
     transition: background-color 0.2s;
 }
 
 .sidenote-highlight:hover {
-    background-color: rgba(255, 200, 0, 0.35);
+    background-color: var(--sidenote-highlight-hover, rgba(255, 200, 0, 0.35));
 }
 
 .sidenote-highlight.orphaned {
-    background-color: rgba(255, 100, 100, 0.15);
-    border-bottom: 2px dashed rgba(255, 100, 100, 0.5);
+    background-color: var(--sidenote-orphaned-color, rgba(255, 100, 100, 0.15));
+    border-bottom: 2px dashed var(--sidenote-orphaned-border, rgba(255, 100, 100, 0.5));
 }
 
 .sidenote-highlight.orphaned:hover {
-    background-color: rgba(255, 100, 100, 0.25);
+    background-color: var(--sidenote-orphaned-hover, rgba(255, 100, 100, 0.25));
 }
 
 /* Active comment in sidebar */
@@ -166,4 +233,138 @@
     background-color: var(--background-modifier-active-hover);
     border-color: var(--interactive-accent);
     box-shadow: 0 0 0 2px var(--interactive-accent-translucent);
+}
+/* Mobile responsive styles */
+@media (max-width: 768px) {
+    .sidenote-comment-modal .modal-content {
+        min-height: 300px;
+    }
+
+    .sidenote-comment-input-container {
+        min-height: 200px;
+    }
+
+    .sidenote-comment-input-container textarea {
+        height: 200px;
+        font-size: 16px; /* Prevents auto-zoom on iOS */
+        padding: 12px;
+    }
+
+    .sidenote-modal-footer {
+        flex-direction: column-reverse;
+    }
+
+    .sidenote-modal-submit-btn,
+    .sidenote-modal-cancel-btn {
+        width: 100%;
+        padding: 12px 16px;
+        font-size: 16px;
+        min-height: 44px; /* Touch target size (WCAG guideline) */
+    }
+
+    .sidenote-modal-footer {
+        gap: 10px;
+    }
+
+    /* Make comment items more touch-friendly */
+    .sidenote-comment-item {
+        padding: 12px;
+        margin-bottom: 16px;
+    }
+
+    /* Keep header inline with menu button */
+    .sidenote-comment-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+    }
+
+    .sidenote-comment-text-info {
+        margin-bottom: 0;
+        flex: 1;
+    }
+
+    .sidenote-selected-text {
+        font-size: 14px;
+        margin-bottom: 6px;
+    }
+
+    .sidenote-timestamp {
+        font-size: 12px;
+    }
+
+    /* Compact menu placement next to title */
+    .sidenote-comment-actions {
+        display: flex;
+        justify-content: flex-end;
+        align-items: flex-start;
+        width: auto;
+        margin-top: 0;
+        position: relative;
+        flex-shrink: 0;
+    }
+
+    .sidenote-comment-actions button {
+        padding: 6px 10px !important;
+        font-size: 16px !important;
+        min-height: 32px;
+        min-width: 32px;
+    }
+
+    .sidenote-menu-button {
+        width: 32px;
+        height: 32px;
+        padding: 4px !important;
+        font-size: 18px !important;
+        background-color: var(--background-modifier-form-field) !important;
+        color: var(--text-normal) !important;
+        border: 1px solid var(--background-modifier-border) !important;
+        border-radius: 6px;
+    }
+
+    .sidenote-action-menu {
+        top: 36px;
+        right: 0;
+        min-width: 140px;
+    }
+
+    /* Improve readability on small screens */
+    .sidenote-comment-content {
+        font-size: 14px;
+        margin-top: 8px;
+    }
+}
+
+@media (max-width: 480px) {
+    .sidenote-comment-input-container textarea {
+        height: 150px;
+    }
+
+    .sidenote-modal-submit-btn,
+    .sidenote-modal-cancel-btn {
+        font-size: 14px;
+        padding: 10px 12px;
+    }
+
+    .sidenote-comment-item {
+        padding: 10px;
+        margin-bottom: 12px;
+    }
+
+    .sidenote-selected-text {
+        font-size: 13px;
+    }
+
+    .sidenote-timestamp {
+        font-size: 11px;
+    }
+
+    .sidenote-comment-actions button {
+        padding: 6px 8px !important;
+        font-size: 14px !important;
+        min-height: 30px;
+        min-width: 30px;
+    }
 }
