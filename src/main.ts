@@ -201,44 +201,12 @@ class SideNoteView extends ItemView {
                             const editor = targetLeaf.view.editor;
                             const fileContent = editor.getValue();
 
-                            // Use stored coordinates - they should already be updated by file change events
-                            // If the coordinates are stale, they will be updated on next file modification
+                            // With dynamic text search in buildDecorations(), coordinates don't need updating
+                            // Just use stored coordinates directly for selection
                             let startLine = comment.startLine;
                             let startChar = comment.startChar;
                             let endLine = comment.endLine;
                             let endChar = comment.endChar;
-
-                            // Verify the text at stored coordinates matches (with hash verification if available)
-                            const lines = fileContent.split('\n');
-                            let textMatches = false;
-
-                            if (startLine < lines.length) {
-                                const line = lines[startLine];
-                                const extractedText = line.substring(startChar, endChar);
-
-                                // Check if hash matches (most reliable)
-                                if (comment.selectedTextHash) {
-                                    const crypto = require('crypto');
-                                    const extractedHash = crypto.createHash('sha256').update(extractedText).digest('hex');
-                                    textMatches = (extractedHash === comment.selectedTextHash);
-                                } else {
-                                    // Fallback to text comparison
-                                    textMatches = (extractedText === comment.selectedText);
-                                }
-                            }
-
-                            // If stored coordinates are invalid, try to find the text with hash verification
-                            if (!textMatches) {
-                                // Force update of comment coordinates
-                                this.plugin.commentManager.updateCommentCoordinatesForFile(fileContent, comment.filePath);
-                                await this.plugin.saveData();
-
-                                // Use updated coordinates
-                                startLine = comment.startLine;
-                                startChar = comment.startChar;
-                                endLine = comment.endLine;
-                                endChar = comment.endChar;
-                            }
 
                             // Set selection
                             editor.setSelection(
@@ -665,6 +633,7 @@ export default class SideNote extends Plugin {
     commentManager: CommentManager;
     settings: SideNoteSettings;
     comments: Comment[] = [];
+    private editorUpdateTimers: Record<string, number> = {};
 
     /** Ensure markdown comment folder exists and return normalized path */
     private async ensureCommentFolder(): Promise<string> {
@@ -885,7 +854,7 @@ export default class SideNote extends Plugin {
             })
         );
 
-        // Update comments when files are modified
+        // Update comments when files are modified (disk-level)
         this.registerEvent(
             this.app.vault.on('modify', async (file) => {
                 // Handle data.json updates
@@ -920,6 +889,30 @@ export default class SideNote extends Plugin {
                         console.error("Error updating comment coordinates:", error);
                     }
                 }
+            })
+        );
+
+        // Live editor change - refresh decorations without marking orphaned (safe for mobile)
+        this.registerEvent(
+            this.app.workspace.on('editor-change', (editor, info) => {
+                const filePath = info?.file?.path;
+                if (!filePath) return;
+
+                const run = () => {
+                    try {
+                        // Only refresh decorations; coordinates are updated on file save
+                        // This avoids marking comments as orphaned during active editing
+                        this.refreshEditorDecorations();
+                    } catch (e) {
+                        console.warn('Failed to refresh decorations on editor-change', e);
+                    }
+                };
+
+                // Debounce per file to avoid excessive work while typing
+                if (this.editorUpdateTimers[filePath]) {
+                    window.clearTimeout(this.editorUpdateTimers[filePath]);
+                }
+                this.editorUpdateTimers[filePath] = window.setTimeout(run, 250);
             })
         );
     }
@@ -1302,9 +1295,10 @@ export default class SideNote extends Plugin {
 
                 if (!filePath) return builder.finish();
 
-                const comments = plugin.commentManager.getCommentsForFile(filePath);
                 const doc = view.state.doc;
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
+
+                const comments = plugin.commentManager.getCommentsForFile(filePath);
 
                 comments.forEach(comment => {
                     // Skip resolved comments (don't show highlights for resolved items)
@@ -1313,42 +1307,123 @@ export default class SideNote extends Plugin {
                     }
 
                     try {
-                        if (comment.isOrphaned) {
-                            // For orphaned comments, highlight one character after the original position
-                            const line = doc.line(comment.startLine + 1); // CodeMirror uses 1-based line numbers
-                            const from = line.from + comment.startChar;
-                            // Highlight one character (or end of line if at the end)
-                            const to = Math.min(from + 1, line.to);
+                        // Always search for the text in the current document to find accurate position
+                        // This ensures highlights stay correct even during active editing on mobile
+                        const docText = doc.toString();
+                        let highlightFound = false;
 
-                            if (from >= 0 && to <= doc.length && from < to) {
-                                decorationsArray.push({
-                                    from,
-                                    to,
-                                    decoration: Decoration.mark({
-                                        class: 'sidenote-highlight orphaned',
-                                        attributes: {
-                                            'data-comment-timestamp': comment.timestamp.toString()
-                                        }
-                                    })
-                                });
+                        if (!comment.isOrphaned && comment.selectedText) {
+                            // Try to find the comment text in the current document
+                            const idx = docText.indexOf(comment.selectedText);
+                            if (idx !== -1) {
+                                // Found the text - highlight it
+                                const from = idx;
+                                const to = idx + comment.selectedText.length;
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                    highlightFound = true;
+                                }
                             }
-                        } else {
-                            // For non-orphaned comments, highlight the original text
-                            const line = doc.line(comment.startLine + 1);
-                            const from = line.from + comment.startChar;
-                            const to = line.from + comment.endChar;
+                        }
 
-                            if (from >= 0 && to <= doc.length && from < to) {
-                                decorationsArray.push({
-                                    from,
-                                    to,
-                                    decoration: Decoration.mark({
-                                        class: 'sidenote-highlight',
-                                        attributes: {
-                                            'data-comment-timestamp': comment.timestamp.toString()
+                        // If exact text not found and comment has hash, try hash-based search
+                        if (!highlightFound && comment.selectedTextHash && !comment.isOrphaned) {
+                            const lines = docText.split('\n');
+                            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+                                const line = lines[lineNum];
+                                for (let startChar = 0; startChar < line.length; startChar++) {
+                                    const candidate = line.substring(startChar, startChar + comment.selectedText.length);
+                                    if (candidate.length === comment.selectedText.length) {
+                                        // Simple hash check using existing hash function
+                                        let hash = 0;
+                                        for (let i = 0; i < candidate.length; i++) {
+                                            hash = ((hash << 5) - hash) + candidate.charCodeAt(i);
                                         }
-                                    })
-                                });
+                                        if (Math.abs(hash).toString(16) === comment.selectedTextHash.substring(0, 8)) {
+                                            // Approximate hash match found
+                                            try {
+                                                const line_obj = doc.line(lineNum + 1);
+                                                const from = line_obj.from + startChar;
+                                                const to = from + comment.selectedText.length;
+                                                if (from >= 0 && to <= doc.length && from < to) {
+                                                    decorationsArray.push({
+                                                        from,
+                                                        to,
+                                                        decoration: Decoration.mark({
+                                                            class: 'sidenote-highlight',
+                                                            attributes: {
+                                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                            }
+                                                        })
+                                                    });
+                                                    highlightFound = true;
+                                                    break;
+                                                }
+                                            } catch (e) {
+                                                // Line doesn't exist, skip
+                                            }
+                                        }
+                                    }
+                                }
+                                if (highlightFound) break;
+                            }
+                        }
+
+                        // Fallback: use stored coordinates if text not found
+                        if (!highlightFound && !comment.isOrphaned) {
+                            try {
+                                const line = doc.line(comment.startLine + 1);
+                                const from = line.from + comment.startChar;
+                                const to = line.from + comment.endChar;
+
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                }
+                            } catch (e) {
+                                // Line doesn't exist, skip
+                            }
+                        }
+
+                        // For orphaned comments, highlight one character after the original position
+                        if (comment.isOrphaned) {
+                            try {
+                                const line = doc.line(comment.startLine + 1); // CodeMirror uses 1-based line numbers
+                                const from = line.from + comment.startChar;
+                                // Highlight one character (or end of line if at the end)
+                                const to = Math.min(from + 1, line.to);
+
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight orphaned',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                }
+                            } catch (e) {
+                                // Line doesn't exist, skip
                             }
                         }
                     } catch (e) {

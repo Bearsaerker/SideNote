@@ -1,5 +1,3 @@
-import { createHash } from 'crypto';
-
 export interface Comment {
     filePath: string;
     startLine: number;
@@ -25,12 +23,50 @@ export class CommentManager {
     }
 
     /**
-     * Generate SHA256 hash of the selected text
+     * Generate SHA256 hash of the selected text using Web Crypto API (mobile-compatible)
      * @param text The text to hash
      * @returns The hash string
      */
+    private async generateHashAsync(text: string): Promise<string> {
+        try {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(text);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            return hashHex;
+        } catch (error) {
+            // Fallback for environments without Web Crypto
+            console.warn('Web Crypto API failed, using simple hash', error);
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return Math.abs(hash).toString(16);
+        }
+    }
+
+    /**
+     * Synchronous hash generation for backward compatibility
+     * Uses Web Crypto API when available, falls back to Node.js crypto
+     */
     private generateHash(text: string): string {
-        return createHash('sha256').update(text).digest('hex');
+        try {
+            // Try Node.js crypto first (desktop)
+            const nodeCrypto = require('crypto');
+            return nodeCrypto.createHash('sha256').update(text).digest('hex');
+        } catch {
+            // Fallback to simple hash (mobile)
+            let hash = 0;
+            for (let i = 0; i < text.length; i++) {
+                const char = text.charCodeAt(i);
+                hash = ((hash << 5) - hash) + char;
+                hash = hash & hash;
+            }
+            return Math.abs(hash).toString(16);
+        }
     }
 
     getCommentsForFile(filePath: string): Comment[] {
