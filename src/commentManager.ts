@@ -12,6 +12,8 @@ export interface Comment {
     timestamp: number;
     isOrphaned?: boolean;
     commentPath?: string; // Path to markdown-stored comment (optional)
+    resolved?: boolean; // Whether comment is marked as resolved (hidden but preserved)
+    resolvedAt?: number | null; // Timestamp when comment was resolved
 }
 
 export class CommentManager {
@@ -54,6 +56,30 @@ export class CommentManager {
         const indexToDelete = this.comments.findIndex(comment => comment.timestamp === timestamp);
         if (indexToDelete > -1) {
             this.comments.splice(indexToDelete, 1);
+        }
+    }
+
+    /**
+     * Mark a comment as resolved (hidden but preserved for audit trail)
+     * @param timestamp The timestamp of the comment to resolve
+     */
+    resolveComment(timestamp: number) {
+        const comment = this.comments.find(c => c.timestamp === timestamp);
+        if (comment) {
+            comment.resolved = true;
+            comment.resolvedAt = Date.now();
+        }
+    }
+
+    /**
+     * Mark a comment as unresolved (reopened)
+     * @param timestamp The timestamp of the comment to unresolve
+     */
+    unresolveComment(timestamp: number) {
+        const comment = this.comments.find(c => c.timestamp === timestamp);
+        if (comment) {
+            comment.resolved = false;
+            comment.resolvedAt = null;
         }
     }
 

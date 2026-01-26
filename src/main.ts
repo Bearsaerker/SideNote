@@ -45,6 +45,7 @@ interface SideNoteSettings {
     markdownFolder: string;
     highlightColor: string;
     highlightOpacity: number;
+    showResolvedComments: boolean; // Show resolved comments dimmed in the sidebar
 }
 
 // Define a new interface for the entire plugin data
@@ -58,6 +59,7 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
     markdownFolder: "side-note-comments",
     highlightColor: "#FFC800",
     highlightOpacity: 0.2,
+    showResolvedComments: false,
 };
 
 class SideNoteView extends ItemView {
@@ -133,6 +135,11 @@ class SideNoteView extends ItemView {
         if (this.file) {
             let commentsForFile = this.plugin.commentManager.getCommentsForFile(this.file.path);
 
+            // Filter out resolved comments unless showResolvedComments setting is enabled
+            if (!this.plugin.settings.showResolvedComments) {
+                commentsForFile = commentsForFile.filter(c => !c.resolved);
+            }
+
             // Sort comments based on setting
             if (this.plugin.settings.commentSortOrder === "position") {
                 commentsForFile.sort((a, b) => {
@@ -150,6 +157,11 @@ class SideNoteView extends ItemView {
                 commentsForFile.forEach((comment) => {
                     const commentEl = commentsContainer.createDiv("sidenote-comment-item");
                     commentEl.setAttribute("data-comment-timestamp", comment.timestamp.toString());
+
+                    // Add resolved class if comment is resolved
+                    if (comment.resolved) {
+                        commentEl.addClass("resolved");
+                    }
 
                     // Highlight active comment
                     if (this.activeCommentTimestamp === comment.timestamp) {
@@ -255,6 +267,21 @@ class SideNoteView extends ItemView {
                         this.plugin
                     );
 
+                    // Enable internal Obsidian links (e.g., [[Title]]) inside comments
+                    contentWrapper.addEventListener('click', (event: MouseEvent) => {
+                        const target = event.target as HTMLElement | null;
+                        const link = target?.closest('a.internal-link') as HTMLElement | null;
+                        if (!link) return;
+
+                        event.preventDefault();
+                        event.stopPropagation();
+
+                        const href = link.getAttribute('href') || link.getAttribute('data-href') || link.innerText;
+                        if (href) {
+                            this.app.workspace.openLinkText(href, comment.filePath, false);
+                        }
+                    });
+
                     // Create menu button for mobile
                     const menuButton = actionsEl.createEl("button", { text: "...", cls: "sidenote-menu-button" });
                     const menuContainer = actionsEl.createDiv("sidenote-action-menu");
@@ -273,6 +300,21 @@ class SideNoteView extends ItemView {
                         e.stopPropagation();
                         menuContainer.classList.remove("visible");
                         this.plugin.deleteComment(comment.timestamp);
+                    };
+
+                    // Add Resolve/Reopen button
+                    const resolveOption = menuContainer.createEl("button", {
+                        text: comment.resolved ? "Reopen" : "Resolve",
+                        cls: "sidenote-menu-option sidenote-menu-resolve"
+                    });
+                    resolveOption.onclick = (e) => {
+                        e.stopPropagation();
+                        menuContainer.classList.remove("visible");
+                        if (comment.resolved) {
+                            this.plugin.unresolveComment(comment.timestamp);
+                        } else {
+                            this.plugin.resolveComment(comment.timestamp);
+                        }
                     };
 
                     menuButton.onclick = (e) => {
@@ -517,6 +559,24 @@ class SideNoteSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
+            .setName("Show resolved comments")
+            .setDesc("Display resolved comments in the sidebar (shown dimmed). Uncheck to hide resolved comments entirely.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.showResolvedComments)
+                    .onChange(async (value: boolean) => {
+                        this.plugin.settings.showResolvedComments = value;
+                        await this.plugin.saveData();
+                        // Re-render the custom view if it's open to apply the new setting
+                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                            if (leaf.view instanceof SideNoteView) {
+                                leaf.view.renderComments();
+                            }
+                        });
+                    })
+            );
+
+        new Setting(containerEl)
             .setName("Highlight color")
             .setDesc("Choose the color for highlighted comments in the editor")
             .addColorPicker((colorPicker) =>
@@ -689,6 +749,9 @@ export default class SideNote extends Plugin {
         // Register editor extensions for highlighting comments
         this.registerEditorExtension([this.createHighlightPlugin()]);
 
+        // Also highlight commented text inside rendered Markdown (Live Preview/Reading view)
+        this.registerMarkdownPreviewHighlights();
+
         this.addSettingTab(new SideNoteSettingTab(this.app, this));
 
         this.registerView("sidenote-view", (leaf) => new SideNoteView(leaf, this));
@@ -746,7 +809,7 @@ export default class SideNote extends Plugin {
         // Add context menu item to editor
         this.registerEvent(
             this.app.workspace.on('editor-menu', (menu, editor, view) => {
-                //  Only add the menu item if there is a selection
+                // Only add if selection exists
                 if (editor.somethingSelected()) {
                     menu.addItem((item) => {
                         item.setTitle("Add comment to selection")
@@ -937,6 +1000,16 @@ export default class SideNote extends Plugin {
         void this.onCommentsChanged("Comment deleted!");
     }
 
+    async resolveComment(timestamp: number) {
+        this.commentManager.resolveComment(timestamp);
+        void this.onCommentsChanged("Comment resolved!");
+    }
+
+    async unresolveComment(timestamp: number) {
+        this.commentManager.unresolveComment(timestamp);
+        void this.onCommentsChanged("Comment reopened!");
+    }
+
     async loadPluginData() {
         const loadedData: PluginData = Object.assign({}, { comments: [] }, DEFAULT_SETTINGS, await this.loadData());
         this.settings = {
@@ -945,6 +1018,7 @@ export default class SideNote extends Plugin {
             markdownFolder: loadedData.markdownFolder || DEFAULT_SETTINGS.markdownFolder,
             highlightColor: loadedData.highlightColor || DEFAULT_SETTINGS.highlightColor,
             highlightOpacity: loadedData.highlightOpacity !== undefined ? loadedData.highlightOpacity : DEFAULT_SETTINGS.highlightOpacity,
+            showResolvedComments: loadedData.showResolvedComments !== undefined ? loadedData.showResolvedComments : DEFAULT_SETTINGS.showResolvedComments,
         };
         this.comments = loadedData.comments || [];
         // Apply highlight color on load
@@ -991,6 +1065,108 @@ export default class SideNote extends Plugin {
         if (changed) {
             await this.saveData();
         }
+    }
+
+    /**
+     * Inject highlights into rendered Markdown (reading view only)
+     * Skips Live Preview/editing modes to preserve context menu functionality.
+     */
+    private registerMarkdownPreviewHighlights() {
+        this.registerMarkdownPostProcessor((element, context) => {
+            // Only apply to Reading view (non-editing preview)
+            // Live Preview editing mode preserves context menu through editor decorations
+            const previewContainer = element.closest('.markdown-preview-view');
+            if (!previewContainer) {
+                return; // Not in Reading view, skip
+            }
+
+            if (!this.settings.showHighlights) return;
+
+            const comments = this.commentManager
+                .getCommentsForFile(context.sourcePath)
+                .filter(c => !c.isOrphaned && !!c.selectedText);
+
+            if (!comments.length) return;
+
+            // Collect all text nodes with absolute offsets
+            const textNodes: Array<{ node: Text; start: number; end: number }> = [];
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+            let offset = 0;
+
+            while (walker.nextNode()) {
+                const node = walker.currentNode as Text;
+                const value = node.nodeValue || "";
+                if (!value.length) continue;
+                const start = offset;
+                const end = start + value.length;
+                textNodes.push({ node, start, end });
+                offset = end;
+            }
+
+            const fullText = textNodes.map(t => t.node.nodeValue || "").join("");
+            if (!fullText.length) return;
+
+            const wraps: Array<{ start: number; end: number; comment: Comment }> = [];
+
+            for (const comment of comments) {
+                const target = comment.selectedText;
+                if (!target) continue;
+                const idx = fullText.indexOf(target);
+                if (idx === -1) continue;
+                wraps.push({
+                    start: idx,
+                    end: idx + target.length,
+                    comment,
+                });
+            }
+
+            if (!wraps.length) return;
+
+            // Helper to map absolute offset to text node and relative position
+            const findPos = (absolute: number): { node: Text; offsetInNode: number } | null => {
+                for (const entry of textNodes) {
+                    if (absolute >= entry.start && absolute <= entry.end) {
+                        return { node: entry.node, offsetInNode: absolute - entry.start };
+                    }
+                }
+                return null;
+            };
+
+            // Apply from the end to avoid offset shifts as we wrap
+            wraps.sort((a, b) => b.start - a.start);
+
+            for (const wrap of wraps) {
+                const startPos = findPos(wrap.start);
+                const endPos = findPos(wrap.end);
+                if (!startPos || !endPos) continue;
+
+                try {
+                    const range = document.createRange();
+                    range.setStart(startPos.node, startPos.offsetInNode);
+                    range.setEnd(endPos.node, endPos.offsetInNode);
+
+                    const span = document.createElement('span');
+                    span.classList.add('sidenote-highlight', 'sidenote-highlight-preview');
+                    span.dataset.commentTimestamp = wrap.comment.timestamp.toString();
+                    span.addEventListener('click', (event: MouseEvent) => {
+                        // Only handle primary button clicks; let other interactions (context menu, selections) flow
+                        if (event.button !== 0) return;
+                        void this.activateViewAndHighlightComment(wrap.comment.timestamp);
+                    });
+
+                    // Ensure browser/Obsidian context menus still work on right-click
+                    span.addEventListener('contextmenu', () => {
+                        /* intentionally empty to keep default behavior */
+                    });
+
+                    range.surroundContents(span);
+                } catch (e) {
+                    // If the range crosses invalid boundaries, skip this wrap
+                    console.warn('Failed to wrap preview highlight', e);
+                    continue;
+                }
+            }
+        });
     }
 
     /**
@@ -1131,6 +1307,11 @@ export default class SideNote extends Plugin {
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
 
                 comments.forEach(comment => {
+                    // Skip resolved comments (don't show highlights for resolved items)
+                    if (comment.resolved) {
+                        return;
+                    }
+
                     try {
                         if (comment.isOrphaned) {
                             // For orphaned comments, highlight one character after the original position

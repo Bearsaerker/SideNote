@@ -69,6 +69,26 @@
     border-color: var(--interactive-accent-hover);
 }
 
+/* Resolved comment styling (dimmed appearance) */
+.sidenote-comment-item.resolved {
+    opacity: 0.6;
+    background-color: var(--background-secondary-alt, var(--background-secondary));
+}
+
+.sidenote-comment-item.resolved:hover {
+    opacity: 0.8;
+    background-color: var(--background-modifier-hover);
+}
+
+.sidenote-comment-item.resolved .sidenote-selected-text {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
+.sidenote-comment-item.resolved .sidenote-timestamp {
+    color: var(--text-disabled);
+}
+
 .sidenote-comment-header {
     display: flex;
     justify-content: space-between;
@@ -192,6 +212,10 @@
     color: var(--text-error, #ff4444);
 }
 
+.sidenote-menu-resolve {
+    color: var(--text-success, #4a7c59);
+}
+
 .sidenote-empty-state {
     display: flex;
     flex-direction: column;
@@ -213,6 +237,7 @@
     border-bottom: 2px solid var(--sidenote-highlight-border, rgba(255, 200, 0, 0.6));
     cursor: pointer;
     transition: background-color 0.2s;
+    user-select: text; /* keep native selection and context menu usable */
 }
 
 .sidenote-highlight:hover {
@@ -226,6 +251,19 @@
 
 .sidenote-highlight.orphaned:hover {
     background-color: var(--sidenote-orphaned-hover, rgba(255, 100, 100, 0.25));
+}
+
+/* Highlights inside rendered markdown (Reading view / Live Preview callouts) */
+.markdown-preview-view .sidenote-highlight,
+.markdown-source-view.mod-cm6 .markdown-rendered .sidenote-highlight {
+    position: relative;
+    z-index: 1;
+    box-decoration-break: clone;
+}
+
+.sidenote-highlight-preview {
+    border-radius: 2px;
+    user-select: text;
 }
 
 /* Active comment in sidebar */
