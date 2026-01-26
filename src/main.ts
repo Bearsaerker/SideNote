@@ -45,6 +45,7 @@ interface SideNoteSettings {
     markdownFolder: string;
     highlightColor: string;
     highlightOpacity: number;
+    showResolvedComments: boolean; // Show resolved comments dimmed in the sidebar
 }
 
 // Define a new interface for the entire plugin data
@@ -58,6 +59,7 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
     markdownFolder: "side-note-comments",
     highlightColor: "#FFC800",
     highlightOpacity: 0.2,
+    showResolvedComments: false,
 };
 
 class SideNoteView extends ItemView {
@@ -133,6 +135,11 @@ class SideNoteView extends ItemView {
         if (this.file) {
             let commentsForFile = this.plugin.commentManager.getCommentsForFile(this.file.path);
 
+            // Filter out resolved comments unless showResolvedComments setting is enabled
+            if (!this.plugin.settings.showResolvedComments) {
+                commentsForFile = commentsForFile.filter(c => !c.resolved);
+            }
+
             // Sort comments based on setting
             if (this.plugin.settings.commentSortOrder === "position") {
                 commentsForFile.sort((a, b) => {
@@ -150,6 +157,11 @@ class SideNoteView extends ItemView {
                 commentsForFile.forEach((comment) => {
                     const commentEl = commentsContainer.createDiv("sidenote-comment-item");
                     commentEl.setAttribute("data-comment-timestamp", comment.timestamp.toString());
+
+                    // Add resolved class if comment is resolved
+                    if (comment.resolved) {
+                        commentEl.addClass("resolved");
+                    }
 
                     // Highlight active comment
                     if (this.activeCommentTimestamp === comment.timestamp) {
@@ -189,44 +201,12 @@ class SideNoteView extends ItemView {
                             const editor = targetLeaf.view.editor;
                             const fileContent = editor.getValue();
 
-                            // Use stored coordinates - they should already be updated by file change events
-                            // If the coordinates are stale, they will be updated on next file modification
+                            // With dynamic text search in buildDecorations(), coordinates don't need updating
+                            // Just use stored coordinates directly for selection
                             let startLine = comment.startLine;
                             let startChar = comment.startChar;
                             let endLine = comment.endLine;
                             let endChar = comment.endChar;
-
-                            // Verify the text at stored coordinates matches (with hash verification if available)
-                            const lines = fileContent.split('\n');
-                            let textMatches = false;
-
-                            if (startLine < lines.length) {
-                                const line = lines[startLine];
-                                const extractedText = line.substring(startChar, endChar);
-
-                                // Check if hash matches (most reliable)
-                                if (comment.selectedTextHash) {
-                                    const crypto = require('crypto');
-                                    const extractedHash = crypto.createHash('sha256').update(extractedText).digest('hex');
-                                    textMatches = (extractedHash === comment.selectedTextHash);
-                                } else {
-                                    // Fallback to text comparison
-                                    textMatches = (extractedText === comment.selectedText);
-                                }
-                            }
-
-                            // If stored coordinates are invalid, try to find the text with hash verification
-                            if (!textMatches) {
-                                // Force update of comment coordinates
-                                this.plugin.commentManager.updateCommentCoordinatesForFile(fileContent, comment.filePath);
-                                await this.plugin.saveData();
-
-                                // Use updated coordinates
-                                startLine = comment.startLine;
-                                startChar = comment.startChar;
-                                endLine = comment.endLine;
-                                endChar = comment.endChar;
-                            }
 
                             // Set selection
                             editor.setSelection(
@@ -255,6 +235,21 @@ class SideNoteView extends ItemView {
                         this.plugin
                     );
 
+                    // Enable internal Obsidian links (e.g., [[Title]]) inside comments
+                    contentWrapper.addEventListener('click', (event: MouseEvent) => {
+                        const target = event.target as HTMLElement | null;
+                        const link = target?.closest('a.internal-link') as HTMLElement | null;
+                        if (!link) return;
+
+                        event.preventDefault();
+                        event.stopPropagation();
+
+                        const href = link.getAttribute('href') || link.getAttribute('data-href') || link.innerText;
+                        if (href) {
+                            this.app.workspace.openLinkText(href, comment.filePath, false);
+                        }
+                    });
+
                     // Create menu button for mobile
                     const menuButton = actionsEl.createEl("button", { text: "...", cls: "sidenote-menu-button" });
                     const menuContainer = actionsEl.createDiv("sidenote-action-menu");
@@ -272,7 +267,24 @@ class SideNoteView extends ItemView {
                     deleteOption.onclick = (e) => {
                         e.stopPropagation();
                         menuContainer.classList.remove("visible");
-                        this.plugin.deleteComment(comment.timestamp);
+                        new ConfirmDeleteModal(this.app, () => {
+                            this.plugin.deleteComment(comment.timestamp);
+                        }).open();
+                    };
+
+                    // Add Resolve/Reopen button
+                    const resolveOption = menuContainer.createEl("button", {
+                        text: comment.resolved ? "Reopen" : "Resolve",
+                        cls: "sidenote-menu-option sidenote-menu-resolve"
+                    });
+                    resolveOption.onclick = (e) => {
+                        e.stopPropagation();
+                        menuContainer.classList.remove("visible");
+                        if (comment.resolved) {
+                            this.plugin.unresolveComment(comment.timestamp);
+                        } else {
+                            this.plugin.resolveComment(comment.timestamp);
+                        }
                     };
 
                     menuButton.onclick = (e) => {
@@ -335,6 +347,47 @@ async function switchToSideNoteView(app: App) {
         void app.workspace.revealLeaf(leaf); // Ensure the new leaf is visible
     } else {
         new Notice("Failed to create or find a leaf for the comment view.");
+    }
+}
+
+class ConfirmDeleteModal extends Modal {
+    onConfirm: () => void;
+
+    constructor(app: App, onConfirm: () => void) {
+        super(app);
+        this.onConfirm = onConfirm;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.addClass("sidenote-confirm-modal");
+
+        contentEl.createEl("h2", { text: "Delete comment" });
+        contentEl.createEl("p", { text: "Are you sure you want to delete this comment? This action cannot be undone." });
+
+        const footer = contentEl.createDiv("sidenote-modal-footer");
+
+        const cancelButton = footer.createEl("button", {
+            text: "Cancel",
+            cls: "sidenote-modal-cancel-btn"
+        });
+        cancelButton.onclick = () => {
+            this.close();
+        };
+
+        const deleteButton = footer.createEl("button", {
+            text: "Delete",
+            cls: "mod-warning sidenote-modal-submit-btn"
+        });
+        deleteButton.onclick = () => {
+            this.onConfirm();
+            this.close();
+        };
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
     }
 }
 
@@ -517,6 +570,24 @@ class SideNoteSettingTab extends PluginSettingTab {
             );
 
         new Setting(containerEl)
+            .setName("Show resolved comments")
+            .setDesc("Display resolved comments in the sidebar (shown dimmed). Uncheck to hide resolved comments entirely.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.showResolvedComments)
+                    .onChange(async (value: boolean) => {
+                        this.plugin.settings.showResolvedComments = value;
+                        await this.plugin.saveData();
+                        // Re-render the custom view if it's open to apply the new setting
+                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                            if (leaf.view instanceof SideNoteView) {
+                                leaf.view.renderComments();
+                            }
+                        });
+                    })
+            );
+
+        new Setting(containerEl)
             .setName("Highlight color")
             .setDesc("Choose the color for highlighted comments in the editor")
             .addColorPicker((colorPicker) =>
@@ -605,6 +676,7 @@ export default class SideNote extends Plugin {
     commentManager: CommentManager;
     settings: SideNoteSettings;
     comments: Comment[] = [];
+    private editorUpdateTimers: Record<string, number> = {};
 
     /** Ensure markdown comment folder exists and return normalized path */
     private async ensureCommentFolder(): Promise<string> {
@@ -689,6 +761,9 @@ export default class SideNote extends Plugin {
         // Register editor extensions for highlighting comments
         this.registerEditorExtension([this.createHighlightPlugin()]);
 
+        // Also highlight commented text inside rendered Markdown (Live Preview/Reading view)
+        this.registerMarkdownPreviewHighlights();
+
         this.addSettingTab(new SideNoteSettingTab(this.app, this));
 
         this.registerView("sidenote-view", (leaf) => new SideNoteView(leaf, this));
@@ -746,7 +821,7 @@ export default class SideNote extends Plugin {
         // Add context menu item to editor
         this.registerEvent(
             this.app.workspace.on('editor-menu', (menu, editor, view) => {
-                //  Only add the menu item if there is a selection
+                // Only add if selection exists
                 if (editor.somethingSelected()) {
                     menu.addItem((item) => {
                         item.setTitle("Add comment to selection")
@@ -822,7 +897,7 @@ export default class SideNote extends Plugin {
             })
         );
 
-        // Update comments when files are modified
+        // Update comments when files are modified (disk-level)
         this.registerEvent(
             this.app.vault.on('modify', async (file) => {
                 // Handle data.json updates
@@ -857,6 +932,30 @@ export default class SideNote extends Plugin {
                         console.error("Error updating comment coordinates:", error);
                     }
                 }
+            })
+        );
+
+        // Live editor change - refresh decorations without marking orphaned (safe for mobile)
+        this.registerEvent(
+            this.app.workspace.on('editor-change', (editor, info) => {
+                const filePath = info?.file?.path;
+                if (!filePath) return;
+
+                const run = () => {
+                    try {
+                        // Only refresh decorations; coordinates are updated on file save
+                        // This avoids marking comments as orphaned during active editing
+                        this.refreshEditorDecorations();
+                    } catch (e) {
+                        console.warn('Failed to refresh decorations on editor-change', e);
+                    }
+                };
+
+                // Debounce per file to avoid excessive work while typing
+                if (this.editorUpdateTimers[filePath]) {
+                    window.clearTimeout(this.editorUpdateTimers[filePath]);
+                }
+                this.editorUpdateTimers[filePath] = window.setTimeout(run, 250);
             })
         );
     }
@@ -937,6 +1036,16 @@ export default class SideNote extends Plugin {
         void this.onCommentsChanged("Comment deleted!");
     }
 
+    async resolveComment(timestamp: number) {
+        this.commentManager.resolveComment(timestamp);
+        void this.onCommentsChanged("Comment resolved!");
+    }
+
+    async unresolveComment(timestamp: number) {
+        this.commentManager.unresolveComment(timestamp);
+        void this.onCommentsChanged("Comment reopened!");
+    }
+
     async loadPluginData() {
         const loadedData: PluginData = Object.assign({}, { comments: [] }, DEFAULT_SETTINGS, await this.loadData());
         this.settings = {
@@ -945,6 +1054,7 @@ export default class SideNote extends Plugin {
             markdownFolder: loadedData.markdownFolder || DEFAULT_SETTINGS.markdownFolder,
             highlightColor: loadedData.highlightColor || DEFAULT_SETTINGS.highlightColor,
             highlightOpacity: loadedData.highlightOpacity !== undefined ? loadedData.highlightOpacity : DEFAULT_SETTINGS.highlightOpacity,
+            showResolvedComments: loadedData.showResolvedComments !== undefined ? loadedData.showResolvedComments : DEFAULT_SETTINGS.showResolvedComments,
         };
         this.comments = loadedData.comments || [];
         // Apply highlight color on load
@@ -991,6 +1101,108 @@ export default class SideNote extends Plugin {
         if (changed) {
             await this.saveData();
         }
+    }
+
+    /**
+     * Inject highlights into rendered Markdown (reading view only)
+     * Skips Live Preview/editing modes to preserve context menu functionality.
+     */
+    private registerMarkdownPreviewHighlights() {
+        this.registerMarkdownPostProcessor((element, context) => {
+            // Only apply to Reading view (non-editing preview)
+            // Live Preview editing mode preserves context menu through editor decorations
+            const previewContainer = element.closest('.markdown-preview-view');
+            if (!previewContainer) {
+                return; // Not in Reading view, skip
+            }
+
+            if (!this.settings.showHighlights) return;
+
+            const comments = this.commentManager
+                .getCommentsForFile(context.sourcePath)
+                .filter(c => !c.isOrphaned && !!c.selectedText);
+
+            if (!comments.length) return;
+
+            // Collect all text nodes with absolute offsets
+            const textNodes: Array<{ node: Text; start: number; end: number }> = [];
+            const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+            let offset = 0;
+
+            while (walker.nextNode()) {
+                const node = walker.currentNode as Text;
+                const value = node.nodeValue || "";
+                if (!value.length) continue;
+                const start = offset;
+                const end = start + value.length;
+                textNodes.push({ node, start, end });
+                offset = end;
+            }
+
+            const fullText = textNodes.map(t => t.node.nodeValue || "").join("");
+            if (!fullText.length) return;
+
+            const wraps: Array<{ start: number; end: number; comment: Comment }> = [];
+
+            for (const comment of comments) {
+                const target = comment.selectedText;
+                if (!target) continue;
+                const idx = fullText.indexOf(target);
+                if (idx === -1) continue;
+                wraps.push({
+                    start: idx,
+                    end: idx + target.length,
+                    comment,
+                });
+            }
+
+            if (!wraps.length) return;
+
+            // Helper to map absolute offset to text node and relative position
+            const findPos = (absolute: number): { node: Text; offsetInNode: number } | null => {
+                for (const entry of textNodes) {
+                    if (absolute >= entry.start && absolute <= entry.end) {
+                        return { node: entry.node, offsetInNode: absolute - entry.start };
+                    }
+                }
+                return null;
+            };
+
+            // Apply from the end to avoid offset shifts as we wrap
+            wraps.sort((a, b) => b.start - a.start);
+
+            for (const wrap of wraps) {
+                const startPos = findPos(wrap.start);
+                const endPos = findPos(wrap.end);
+                if (!startPos || !endPos) continue;
+
+                try {
+                    const range = document.createRange();
+                    range.setStart(startPos.node, startPos.offsetInNode);
+                    range.setEnd(endPos.node, endPos.offsetInNode);
+
+                    const span = document.createElement('span');
+                    span.classList.add('sidenote-highlight', 'sidenote-highlight-preview');
+                    span.dataset.commentTimestamp = wrap.comment.timestamp.toString();
+                    span.addEventListener('click', (event: MouseEvent) => {
+                        // Only handle primary button clicks; let other interactions (context menu, selections) flow
+                        if (event.button !== 0) return;
+                        void this.activateViewAndHighlightComment(wrap.comment.timestamp);
+                    });
+
+                    // Ensure browser/Obsidian context menus still work on right-click
+                    span.addEventListener('contextmenu', () => {
+                        /* intentionally empty to keep default behavior */
+                    });
+
+                    range.surroundContents(span);
+                } catch (e) {
+                    // If the range crosses invalid boundaries, skip this wrap
+                    console.warn('Failed to wrap preview highlight', e);
+                    continue;
+                }
+            }
+        });
     }
 
     /**
@@ -1126,48 +1338,135 @@ export default class SideNote extends Plugin {
 
                 if (!filePath) return builder.finish();
 
-                const comments = plugin.commentManager.getCommentsForFile(filePath);
                 const doc = view.state.doc;
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
 
+                const comments = plugin.commentManager.getCommentsForFile(filePath);
+
                 comments.forEach(comment => {
+                    // Skip resolved comments (don't show highlights for resolved items)
+                    if (comment.resolved) {
+                        return;
+                    }
+
                     try {
-                        if (comment.isOrphaned) {
-                            // For orphaned comments, highlight one character after the original position
-                            const line = doc.line(comment.startLine + 1); // CodeMirror uses 1-based line numbers
-                            const from = line.from + comment.startChar;
-                            // Highlight one character (or end of line if at the end)
-                            const to = Math.min(from + 1, line.to);
+                        // Always search for the text in the current document to find accurate position
+                        // This ensures highlights stay correct even during active editing on mobile
+                        const docText = doc.toString();
+                        let highlightFound = false;
 
-                            if (from >= 0 && to <= doc.length && from < to) {
-                                decorationsArray.push({
-                                    from,
-                                    to,
-                                    decoration: Decoration.mark({
-                                        class: 'sidenote-highlight orphaned',
-                                        attributes: {
-                                            'data-comment-timestamp': comment.timestamp.toString()
-                                        }
-                                    })
-                                });
+                        if (!comment.isOrphaned && comment.selectedText) {
+                            // Try to find the comment text in the current document
+                            const idx = docText.indexOf(comment.selectedText);
+                            if (idx !== -1) {
+                                // Found the text - highlight it
+                                const from = idx;
+                                const to = idx + comment.selectedText.length;
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                    highlightFound = true;
+                                }
                             }
-                        } else {
-                            // For non-orphaned comments, highlight the original text
-                            const line = doc.line(comment.startLine + 1);
-                            const from = line.from + comment.startChar;
-                            const to = line.from + comment.endChar;
+                        }
 
-                            if (from >= 0 && to <= doc.length && from < to) {
-                                decorationsArray.push({
-                                    from,
-                                    to,
-                                    decoration: Decoration.mark({
-                                        class: 'sidenote-highlight',
-                                        attributes: {
-                                            'data-comment-timestamp': comment.timestamp.toString()
+                        // If exact text not found and comment has hash, try hash-based search
+                        if (!highlightFound && comment.selectedTextHash && !comment.isOrphaned) {
+                            const lines = docText.split('\n');
+                            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+                                const line = lines[lineNum];
+                                for (let startChar = 0; startChar < line.length; startChar++) {
+                                    const candidate = line.substring(startChar, startChar + comment.selectedText.length);
+                                    if (candidate.length === comment.selectedText.length) {
+                                        // Simple hash check using existing hash function
+                                        let hash = 0;
+                                        for (let i = 0; i < candidate.length; i++) {
+                                            hash = ((hash << 5) - hash) + candidate.charCodeAt(i);
                                         }
-                                    })
-                                });
+                                        if (Math.abs(hash).toString(16) === comment.selectedTextHash.substring(0, 8)) {
+                                            // Approximate hash match found
+                                            try {
+                                                const line_obj = doc.line(lineNum + 1);
+                                                const from = line_obj.from + startChar;
+                                                const to = from + comment.selectedText.length;
+                                                if (from >= 0 && to <= doc.length && from < to) {
+                                                    decorationsArray.push({
+                                                        from,
+                                                        to,
+                                                        decoration: Decoration.mark({
+                                                            class: 'sidenote-highlight',
+                                                            attributes: {
+                                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                            }
+                                                        })
+                                                    });
+                                                    highlightFound = true;
+                                                    break;
+                                                }
+                                            } catch (e) {
+                                                // Line doesn't exist, skip
+                                            }
+                                        }
+                                    }
+                                }
+                                if (highlightFound) break;
+                            }
+                        }
+
+                        // Fallback: use stored coordinates if text not found
+                        if (!highlightFound && !comment.isOrphaned) {
+                            try {
+                                const line = doc.line(comment.startLine + 1);
+                                const from = line.from + comment.startChar;
+                                const to = line.from + comment.endChar;
+
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                }
+                            } catch (e) {
+                                // Line doesn't exist, skip
+                            }
+                        }
+
+                        // For orphaned comments, highlight one character after the original position
+                        if (comment.isOrphaned) {
+                            try {
+                                const line = doc.line(comment.startLine + 1); // CodeMirror uses 1-based line numbers
+                                const from = line.from + comment.startChar;
+                                // Highlight one character (or end of line if at the end)
+                                const to = Math.min(from + 1, line.to);
+
+                                if (from >= 0 && to <= doc.length && from < to) {
+                                    decorationsArray.push({
+                                        from,
+                                        to,
+                                        decoration: Decoration.mark({
+                                            class: 'sidenote-highlight orphaned',
+                                            attributes: {
+                                                'data-comment-timestamp': comment.timestamp.toString()
+                                            }
+                                        })
+                                    });
+                                }
+                            } catch (e) {
+                                // Line doesn't exist, skip
                             }
                         }
                     } catch (e) {

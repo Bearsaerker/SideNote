@@ -157,6 +157,18 @@ Access settings via Settings → Side Note:
 
 ## Version History
 
+### 1.0.4
+- **Fixed coordinate drift issue on mobile devices**
+  - Implemented dynamic text search for highlights to always display at accurate positions during editing
+  - Resolved highlight position drift on Android/iOS when editing lines
+  - Prevented stale cached coordinates by searching for text on every highlight render
+- **Fixed orphaned issue when clicking comments**
+  - Resolved issue where clicking comments triggered unnecessary coordinate updates that marked comments as orphaned
+  - Removed coordinate update logic from click handlers since dynamic search eliminates the need for updates
+- **Added confirmation modal for deletion**
+  - Added confirmation modal when pressing the delete button to prevent accidental deletions
+  - Provides "Cancel" and "Delete" options for safe deletion operations
+
 ### 1.0.3
 - **Added full mobile support** for iOS and Android devices
 - **Added comment button to mobile editor toolbar** (message icon) for easy access
