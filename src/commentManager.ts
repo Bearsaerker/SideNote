@@ -1,4 +1,5 @@
 export interface Comment {
+    id: string;
     filePath: string;
     startLine: number;
     startChar: number;
@@ -81,15 +82,15 @@ export class CommentManager {
         this.comments.push(newComment);
     }
 
-    editComment(timestamp: number, newCommentText: string) {
-        const commentToEdit = this.comments.find(comment => comment.timestamp === timestamp);
+    editComment(id: string, newCommentText: string) {
+        const commentToEdit = this.comments.find(comment => comment.id === id);
         if (commentToEdit) {
             commentToEdit.comment = newCommentText;
         }
     }
 
-    deleteComment(timestamp: number) {
-        const indexToDelete = this.comments.findIndex(comment => comment.timestamp === timestamp);
+    deleteComment(id: string) {
+        const indexToDelete = this.comments.findIndex(comment => comment.id === id);
         if (indexToDelete > -1) {
             this.comments.splice(indexToDelete, 1);
         }
@@ -97,10 +98,10 @@ export class CommentManager {
 
     /**
      * Mark a comment as resolved (hidden but preserved for audit trail)
-     * @param timestamp The timestamp of the comment to resolve
+     * @param id The id of the comment to resolve
      */
-    resolveComment(timestamp: number) {
-        const comment = this.comments.find(c => c.timestamp === timestamp);
+    resolveComment(id: string) {
+        const comment = this.comments.find(c => c.id === id);
         if (comment) {
             comment.resolved = true;
             comment.resolvedAt = Date.now();
@@ -109,10 +110,10 @@ export class CommentManager {
 
     /**
      * Mark a comment as unresolved (reopened)
-     * @param timestamp The timestamp of the comment to unresolve
+     * @param id The id of the comment to unresolve
      */
-    unresolveComment(timestamp: number) {
-        const comment = this.comments.find(c => c.timestamp === timestamp);
+    unresolveComment(id: string) {
+        const comment = this.comments.find(c => c.id === id);
         if (comment) {
             comment.resolved = false;
             comment.resolvedAt = null;
