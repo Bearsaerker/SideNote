@@ -2,8 +2,6 @@
 
 SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add comments to your notes. These comments are displayed in a dedicated side pane, making it easy to review and navigate annotations without cluttering the main text. Comments are highlighted directly in the editor for quick visual reference.
 
-For local development and debug workflow, see [README-dev.md](./README-dev.md).
-
 ## Features
 
 ### Core Features
@@ -158,6 +156,17 @@ Access settings via Settings → Side Note:
 - Uses CodeMirror 6 decorations for in-editor highlighting
 
 ## Version History
+
+### 1.0.5
+- **Fixed duplicate comment creation** (issue [#16](https://github.com/mofukuru/SideNote/issues/16), [#18](https://github.com/mofukuru/SideNote/issues/18), [#10](https://github.com/mofukuru/SideNote/issues/10))
+  - Hardened modal submit handling to prevent double execution from click/touch events
+  - Added submit re-entrancy guard and debounce to block rapid repeat submissions
+  - Migrated comment identity from timestamp to stable UUID (`id`) for reliable targeting
+  - Switched markdown markers to id-based format with legacy timestamp fallback
+- **Fixed orphaned comments not recovering** (issue [#15](https://github.com/mofukuru/SideNote/issues/15))
+  - Orphaned comments are now re-checked on every file update and automatically recover if the text is found again
+- **Added "View all comments" command**
+  - New command in the command palette to open a cross-file view showing all comments grouped by note
 
 ### 1.0.4
 - **Fixed coordinate drift issue on mobile devices**

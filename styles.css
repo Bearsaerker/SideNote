@@ -406,3 +406,40 @@
         min-width: 30px;
     }
 }
+
+/* View header toggle */
+.sidenote-view-header {
+    display: flex;
+    justify-content: flex-end;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.sidenote-view-toggle {
+    font-size: var(--font-ui-smaller);
+    padding: 2px 8px;
+    cursor: pointer;
+    background: var(--background-modifier-hover);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    color: var(--text-muted);
+}
+
+.sidenote-view-toggle:hover {
+    background: var(--background-modifier-active-hover);
+    color: var(--text-normal);
+}
+
+/* All notes view file section */
+.sidenote-file-section {
+    margin-bottom: 8px;
+}
+
+.sidenote-file-heading {
+    font-size: var(--font-ui-small);
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 6px 8px 4px;
+    margin: 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+}

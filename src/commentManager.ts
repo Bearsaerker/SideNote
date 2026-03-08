@@ -429,11 +429,6 @@ export class CommentManager {
         const fileComments = this.comments.filter(comment => comment.filePath === filePath);
 
         fileComments.forEach(comment => {
-            // Skip if already marked as orphaned
-            if (comment.isOrphaned) {
-                return;
-            }
-
             let newPosition: { line: number; startChar: number; endChar: number } | null = null;
 
             // Stage 1: Search near old coordinates with hash verification
@@ -476,12 +471,13 @@ export class CommentManager {
                 );
             }
 
-            // Update or mark as orphaned
+            // Update or mark as orphaned; recover previously orphaned comments if text is found again
             if (newPosition) {
                 comment.startLine = newPosition.line;
                 comment.startChar = newPosition.startChar;
                 comment.endLine = newPosition.line;
                 comment.endChar = newPosition.endChar;
+                comment.isOrphaned = false;
             } else {
                 comment.isOrphaned = true;
             }

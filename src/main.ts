@@ -2,9 +2,6 @@ import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateRes
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
-import { debugCount, debugLog, setDebugMarker } from "./runtime/debug";
-import { isDebugEnabled } from "./runtime/flags";
-import { startDevAutoReloadWatcher } from "./runtime/devAutoReload";
 import { buildMarkdownBlock as buildCommentMarkdownBlock, removeMarkdownCommentBlock, replaceMarkdownCommentBlock } from "./core/markdownCommentBlocks";
 import { bindModalActionHandlers } from "./core/modalActionBindings";
 import { SubmitExecutionGuard } from "./core/submitExecutionGuard";
@@ -87,6 +84,7 @@ class SideNoteView extends ItemView {
     private file: TFile | null = null;
     private plugin: SideNote;
     private activeCommentId: string | null = null;
+    private showAllNotes = false;
 
     constructor(leaf: WorkspaceLeaf, plugin: SideNote, file: TFile | null = null) {
         super(leaf);
@@ -150,18 +148,159 @@ class SideNoteView extends ItemView {
         }, 100);
     }
 
+    public setShowAllNotes(value: boolean) {
+        this.showAllNotes = value;
+        this.renderComments();
+    }
+
+    private renderCommentItem(container: HTMLElement, comment: Comment) {
+        const commentEl = container.createDiv("sidenote-comment-item");
+        commentEl.setAttribute("data-comment-id", comment.id);
+
+        if (comment.resolved) {
+            commentEl.addClass("resolved");
+        }
+
+        if (this.activeCommentId === comment.id) {
+            commentEl.addClass("active");
+        }
+
+        const headerEl = commentEl.createDiv("sidenote-comment-header");
+        const textInfoEl = headerEl.createDiv("sidenote-comment-text-info");
+        textInfoEl.createEl("h4", { text: comment.selectedText, cls: "sidenote-selected-text" });
+        textInfoEl.createEl("small", { text: new Date(comment.timestamp).toLocaleString(), cls: "sidenote-timestamp" });
+
+        const actionsEl = headerEl.createDiv("sidenote-comment-actions");
+
+        commentEl.onclick = async () => {
+            let targetLeaf: WorkspaceLeaf | null = null;
+            this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
+                if (leaf.view instanceof MarkdownView && leaf.view.file?.path === comment.filePath) {
+                    targetLeaf = leaf;
+                    return false;
+                }
+            });
+
+            if (!targetLeaf) {
+                const file = this.app.vault.getAbstractFileByPath(comment.filePath);
+                if (file instanceof TFile) {
+                    const newLeaf = this.app.workspace.getLeaf(true);
+                    await newLeaf.openFile(file);
+                    targetLeaf = newLeaf;
+                }
+            }
+
+            if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
+                this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+                const editor = targetLeaf.view.editor;
+
+                editor.setSelection(
+                    { line: comment.startLine, ch: comment.startChar },
+                    { line: comment.endLine, ch: comment.endChar }
+                );
+                editor.scrollIntoView({
+                    from: { line: comment.startLine, ch: 0 },
+                    to: { line: comment.endLine, ch: 0 }
+                }, true);
+                editor.focus();
+            } else {
+                new Notice("Failed to jump to Markdown view.");
+            }
+        };
+
+        const contentWrapper = commentEl.createDiv({ cls: "sidenote-comment-content" });
+        MarkdownRenderer.renderMarkdown(
+            comment.comment || "",
+            contentWrapper,
+            comment.filePath,
+            this.plugin
+        );
+
+        contentWrapper.addEventListener('click', (event: MouseEvent) => {
+            const target = event.target as HTMLElement | null;
+            const link = target?.closest('a.internal-link') as HTMLElement | null;
+            if (!link) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            const href = link.getAttribute('href') || link.getAttribute('data-href') || link.innerText;
+            if (href) {
+                this.app.workspace.openLinkText(href, comment.filePath, false);
+            }
+        });
+
+        const menuButton = actionsEl.createEl("button", { text: "...", cls: "sidenote-menu-button" });
+        const menuContainer = actionsEl.createDiv("sidenote-action-menu");
+
+        const editOption = menuContainer.createEl("button", { text: "Edit", cls: "sidenote-menu-option sidenote-menu-edit" });
+        editOption.onclick = (e) => {
+            e.stopPropagation();
+            menuContainer.classList.remove("visible");
+            new CommentModal(this.app, async (editedComment) => {
+                await this.plugin.editComment(comment.id, editedComment);
+            }, comment.comment).open();
+        };
+
+        const deleteOption = menuContainer.createEl("button", { text: "Delete", cls: "sidenote-menu-option sidenote-menu-delete" });
+        deleteOption.onclick = (e) => {
+            e.stopPropagation();
+            menuContainer.classList.remove("visible");
+            new ConfirmDeleteModal(this.app, () => {
+                this.plugin.deleteComment(comment.id);
+            }).open();
+        };
+
+        const resolveOption = menuContainer.createEl("button", {
+            text: comment.resolved ? "Reopen" : "Resolve",
+            cls: "sidenote-menu-option sidenote-menu-resolve"
+        });
+        resolveOption.onclick = (e) => {
+            e.stopPropagation();
+            menuContainer.classList.remove("visible");
+            if (comment.resolved) {
+                this.plugin.unresolveComment(comment.id);
+            } else {
+                this.plugin.resolveComment(comment.id);
+            }
+        };
+
+        menuButton.onclick = (e) => {
+            e.stopPropagation();
+            menuContainer.classList.toggle("visible");
+        };
+
+        document.addEventListener("click", () => {
+            menuContainer.classList.remove("visible");
+        });
+    }
+
     public renderComments() { // Made public for settings tab to re-render
         this.containerEl.empty();
         this.containerEl.addClass("sidenote-view-container");
+
+        const viewHeader = this.containerEl.createDiv("sidenote-view-header");
+        const toggleBtn = viewHeader.createEl("button", {
+            text: this.showAllNotes ? "Current File" : "All Notes",
+            cls: "sidenote-view-toggle",
+        });
+        toggleBtn.onclick = () => {
+            this.showAllNotes = !this.showAllNotes;
+            this.renderComments();
+        };
+
+        if (this.showAllNotes) {
+            this.renderAllNotesView();
+            return;
+        }
+
         if (this.file) {
             let commentsForFile = this.plugin.commentManager.getCommentsForFile(this.file.path);
 
-            // Filter out resolved comments unless showResolvedComments setting is enabled
             if (!this.plugin.settings.showResolvedComments) {
                 commentsForFile = commentsForFile.filter(c => !c.resolved);
             }
 
-            // Sort comments based on setting
             if (this.plugin.settings.commentSortOrder === "position") {
                 commentsForFile.sort((a, b) => {
                     if (a.startLine === b.startLine) {
@@ -169,154 +308,14 @@ class SideNoteView extends ItemView {
                     }
                     return a.startLine - b.startLine;
                 });
-            } else { // Default to timestamp
+            } else {
                 commentsForFile.sort((a, b) => a.timestamp - b.timestamp);
             }
 
             if (commentsForFile.length > 0) {
                 const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
                 commentsForFile.forEach((comment) => {
-                    const commentEl = commentsContainer.createDiv("sidenote-comment-item");
-                    commentEl.setAttribute("data-comment-id", comment.id);
-
-                    // Add resolved class if comment is resolved
-                    if (comment.resolved) {
-                        commentEl.addClass("resolved");
-                    }
-
-                    // Highlight active comment
-                    if (this.activeCommentId === comment.id) {
-                        commentEl.addClass("active");
-                    }
-
-                    const headerEl = commentEl.createDiv("sidenote-comment-header");
-                    const textInfoEl = headerEl.createDiv("sidenote-comment-text-info");
-                    textInfoEl.createEl("h4", { text: comment.selectedText, cls: "sidenote-selected-text" });
-                    textInfoEl.createEl("small", { text: new Date(comment.timestamp).toLocaleString(), cls: "sidenote-timestamp" });
-
-                    const actionsEl = headerEl.createDiv("sidenote-comment-actions");
-
-                    // Clicking the comment jumps to its location in the file
-                    commentEl.onclick = async () => {
-                        let targetLeaf: WorkspaceLeaf | null = null;
-                        // Try to find an existing Markdown view for the file
-                        this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
-                            if (leaf.view instanceof MarkdownView && leaf.view.file?.path === comment.filePath) {
-                                targetLeaf = leaf;
-                                return false; // Stop iteration
-                            }
-                        });
-
-                        // If no existing view, open a new one.
-                        if (!targetLeaf) {
-                            const file = this.app.vault.getAbstractFileByPath(comment.filePath);
-                            if (file instanceof TFile) {
-                                const newLeaf = this.app.workspace.getLeaf(true);
-                                await newLeaf.openFile(file);
-                                targetLeaf = newLeaf;
-                            }
-                        }
-
-                        if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
-                            this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
-                            const editor = targetLeaf.view.editor;
-                            const fileContent = editor.getValue();
-
-                            // With dynamic text search in buildDecorations(), coordinates don't need updating
-                            // Just use stored coordinates directly for selection
-                            let startLine = comment.startLine;
-                            let startChar = comment.startChar;
-                            let endLine = comment.endLine;
-                            let endChar = comment.endChar;
-
-                            // Set selection
-                            editor.setSelection(
-                                { line: startLine, ch: startChar },
-                                { line: endLine, ch: endChar }
-                            );
-
-                            // Scroll to the selection
-                            editor.scrollIntoView({
-                                from: { line: startLine, ch: 0 },
-                                to: { line: endLine, ch: 0 }
-                            }, true);
-
-                            editor.focus();
-                        } else {
-                            new Notice("Failed to jump to Markdown view.");
-                        }
-                    };
-
-                    const contentWrapper = commentEl.createDiv({ cls: "sidenote-comment-content" });
-                    // Render markdown for the comment content so formatting is preserved
-                    MarkdownRenderer.renderMarkdown(
-                        comment.comment || "",
-                        contentWrapper,
-                        comment.filePath,
-                        this.plugin
-                    );
-
-                    // Enable internal Obsidian links (e.g., [[Title]]) inside comments
-                    contentWrapper.addEventListener('click', (event: MouseEvent) => {
-                        const target = event.target as HTMLElement | null;
-                        const link = target?.closest('a.internal-link') as HTMLElement | null;
-                        if (!link) return;
-
-                        event.preventDefault();
-                        event.stopPropagation();
-
-                        const href = link.getAttribute('href') || link.getAttribute('data-href') || link.innerText;
-                        if (href) {
-                            this.app.workspace.openLinkText(href, comment.filePath, false);
-                        }
-                    });
-
-                    // Create menu button for mobile
-                    const menuButton = actionsEl.createEl("button", { text: "...", cls: "sidenote-menu-button" });
-                    const menuContainer = actionsEl.createDiv("sidenote-action-menu");
-
-                    const editOption = menuContainer.createEl("button", { text: "Edit", cls: "sidenote-menu-option sidenote-menu-edit" });
-                    editOption.onclick = (e) => {
-                        e.stopPropagation();
-                        menuContainer.classList.remove("visible");
-                        new CommentModal(this.app, async (editedComment) => {
-                            await this.plugin.editComment(comment.id, editedComment);
-                        }, comment.comment).open();
-                    };
-
-                    const deleteOption = menuContainer.createEl("button", { text: "Delete", cls: "sidenote-menu-option sidenote-menu-delete" });
-                    deleteOption.onclick = (e) => {
-                        e.stopPropagation();
-                        menuContainer.classList.remove("visible");
-                        new ConfirmDeleteModal(this.app, () => {
-                            this.plugin.deleteComment(comment.id);
-                        }).open();
-                    };
-
-                    // Add Resolve/Reopen button
-                    const resolveOption = menuContainer.createEl("button", {
-                        text: comment.resolved ? "Reopen" : "Resolve",
-                        cls: "sidenote-menu-option sidenote-menu-resolve"
-                    });
-                    resolveOption.onclick = (e) => {
-                        e.stopPropagation();
-                        menuContainer.classList.remove("visible");
-                        if (comment.resolved) {
-                            this.plugin.unresolveComment(comment.id);
-                        } else {
-                            this.plugin.resolveComment(comment.id);
-                        }
-                    };
-
-                    menuButton.onclick = (e) => {
-                        e.stopPropagation();
-                        menuContainer.classList.toggle("visible");
-                    };
-
-                    // Close menu when clicking outside
-                    document.addEventListener("click", () => {
-                        menuContainer.classList.remove("visible");
-                    });
+                    this.renderCommentItem(commentsContainer, comment);
                 });
             } else {
                 const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
@@ -327,6 +326,46 @@ class SideNoteView extends ItemView {
             const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
             emptyStateEl.createEl("p", { text: "No file selected." });
             emptyStateEl.createEl("p", { text: "Open a file to see its comments." });
+        }
+    }
+
+    private renderAllNotesView() {
+        let allComments = this.plugin.commentManager.getComments();
+
+        if (!this.plugin.settings.showResolvedComments) {
+            allComments = allComments.filter(c => !c.resolved);
+        }
+
+        if (allComments.length === 0) {
+            const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
+            emptyStateEl.createEl("p", { text: "No comments found across all notes." });
+            return;
+        }
+
+        // Group by filePath
+        const byFile = new Map<string, typeof allComments>();
+        for (const comment of allComments) {
+            const group = byFile.get(comment.filePath) ?? [];
+            group.push(comment);
+            byFile.set(comment.filePath, group);
+        }
+
+        const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
+        for (const [filePath, comments] of byFile) {
+            const fileName = filePath.split("/").pop() ?? filePath;
+            const fileSection = commentsContainer.createDiv("sidenote-file-section");
+            fileSection.createEl("h3", { text: fileName, cls: "sidenote-file-heading" });
+
+            const sorted = [...comments];
+            if (this.plugin.settings.commentSortOrder === "position") {
+                sorted.sort((a, b) => a.startLine !== b.startLine ? a.startLine - b.startLine : a.startChar - b.startChar);
+            } else {
+                sorted.sort((a, b) => a.timestamp - b.timestamp);
+            }
+
+            for (const comment of sorted) {
+                this.renderCommentItem(fileSection, comment);
+            }
         }
     }
 
@@ -420,7 +459,6 @@ class CommentModal extends Modal {
     private submitButtonEl: HTMLButtonElement | null = null;
     private cancelButtonEl: HTMLButtonElement | null = null;
     private readonly submitGuard = new SubmitExecutionGuard(400);
-    private readonly debugModalId = generateCommentId();
 
     constructor(app: App, onSubmit: (comment: string) => void | Promise<void>, initialComment: string = '') {
         super(app);
@@ -430,7 +468,6 @@ class CommentModal extends Modal {
 
     onOpen() {
         const { contentEl } = this;
-        debugLog("CommentModal.onOpen", { modalId: this.debugModalId, mode: this.initialComment ? "edit" : "add" });
         contentEl.addClass("sidenote-comment-modal");
 
         contentEl.createEl("h2", { text: this.initialComment ? "Edit comment" : "Add comment" });
@@ -479,8 +516,6 @@ class CommentModal extends Modal {
         submitButton.setAttribute('type', 'button');
 
         const handleSubmit = async () => {
-            debugCount(`handleSubmit click/touch modal=${this.debugModalId}`);
-            // Blur the input to hide keyboard
             if (this.textareaEl) {
                 this.textareaEl.blur();
             }
@@ -493,12 +528,6 @@ class CommentModal extends Modal {
             submitGuard: this.submitGuard,
             onSubmitTriggered: handleSubmit,
             onCancelTriggered: handleCancel,
-            onDebounceSuppressed: (deltaMs: number) => {
-                debugLog("handleSubmit suppressed by debounce", {
-                    modalId: this.debugModalId,
-                    deltaMs,
-                });
-            },
         });
 
         // Set focus after short delay to ensure modal is fully rendered
@@ -522,15 +551,12 @@ class CommentModal extends Modal {
     }
 
     async submitComment() {
-        debugCount(`submitComment entry modal=${this.debugModalId}`);
         if (!this.textareaEl) {
             new Notice("Error: Comment field is empty");
-            debugLog("submitComment missing textarea", { modalId: this.debugModalId });
             return;
         }
 
         if (!this.submitGuard.tryStartSubmit()) {
-            debugLog("submitComment blocked by isSubmitting", { modalId: this.debugModalId });
             return;
         }
 
@@ -543,9 +569,7 @@ class CommentModal extends Modal {
 
         this.comment = this.textareaEl.value;
         try {
-            debugLog("submitComment awaiting onSubmit", { modalId: this.debugModalId, length: this.comment.length });
             await this.onSubmit(this.comment);
-            debugLog("submitComment onSubmit resolved", { modalId: this.debugModalId });
             this.close();
         } catch (error) {
             new Notice("Error: Failed to save comment");
@@ -558,13 +582,11 @@ class CommentModal extends Modal {
             if (this.cancelButtonEl) {
                 this.cancelButtonEl.disabled = false;
             }
-            debugLog("submitComment finally", { modalId: this.debugModalId, isSubmitting: this.submitGuard.isSubmitting() });
         }
     }
 
     onClose() {
         const { contentEl } = this;
-        debugLog("CommentModal.onClose", { modalId: this.debugModalId });
         contentEl.empty();
         this.textareaEl = null;
         this.submitButtonEl = null;
@@ -812,19 +834,6 @@ export default class SideNote extends Plugin {
     async onload() {
         await this.loadPluginData(); // Load all data
 
-        if (isDebugEnabled()) {
-            const marker = setDebugMarker(this.manifest.version, this.manifest.id);
-            if (marker) {
-                new Notice(`SideNote debug loaded (${marker.loadedAt})`);
-            }
-        }
-
-        startDevAutoReloadWatcher({
-            app: this.app,
-            pluginId: this.manifest.id,
-            registerInterval: (intervalId: number) => this.registerInterval(intervalId),
-        });
-
         this.commentManager = new CommentManager(this.comments);
 
         // Migrate existing comments: add missing hashes and initialize isOrphaned flag
@@ -853,6 +862,20 @@ export default class SideNote extends Plugin {
             name: "Open in Sidebar",
             callback: () => {
                 this.activateView();
+            },
+        });
+
+        this.addCommand({
+            id: "view-all-comments",
+            name: "View all comments",
+            icon: "list",
+            callback: async () => {
+                await this.activateView();
+                this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                    if (leaf.view instanceof SideNoteView) {
+                        leaf.view.setShowAllNotes(true);
+                    }
+                });
             },
         });
 
@@ -1082,7 +1105,6 @@ export default class SideNote extends Plugin {
     }
 
     async onCommentsChanged(message: string) {
-        debugCount(`onCommentsChanged ${message}`);
         await this.saveData();
         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
             if (leaf.view instanceof SideNoteView) {
@@ -1107,8 +1129,6 @@ export default class SideNote extends Plugin {
     }
 
     async addComment(newComment: Comment) {
-        debugCount("addComment");
-        debugLog("addComment payload", { id: newComment.id, filePath: newComment.filePath, timestamp: newComment.timestamp });
         const now = Date.now();
         const fingerprint = this.createAddFingerprint(newComment);
         if (
@@ -1116,12 +1136,6 @@ export default class SideNote extends Plugin {
             this.lastAddFingerprint.key === fingerprint &&
             now - this.lastAddFingerprint.at < this.duplicateAddWindowMs
         ) {
-            debugCount("addComment suppressed duplicate-window");
-            debugLog("addComment suppressed duplicate-window", {
-                id: newComment.id,
-                windowMs: this.duplicateAddWindowMs,
-                deltaMs: now - this.lastAddFingerprint.at,
-            });
             return;
         }
         this.lastAddFingerprint = { key: fingerprint, at: now };
@@ -1130,29 +1144,21 @@ export default class SideNote extends Plugin {
     }
 
     async editComment(commentId: string, newCommentText: string) {
-        debugCount("editComment");
-        debugLog("editComment payload", { id: commentId, length: newCommentText.length });
         this.commentManager.editComment(commentId, newCommentText);
         await this.onCommentsChanged("Comment updated!");
     }
 
     async deleteComment(commentId: string) {
-        debugCount("deleteComment");
-        debugLog("deleteComment payload", { id: commentId });
         this.commentManager.deleteComment(commentId);
         await this.onCommentsChanged("Comment deleted!");
     }
 
     async resolveComment(commentId: string) {
-        debugCount("resolveComment");
-        debugLog("resolveComment payload", { id: commentId });
         this.commentManager.resolveComment(commentId);
         await this.onCommentsChanged("Comment resolved!");
     }
 
     async unresolveComment(commentId: string) {
-        debugCount("unresolveComment");
-        debugLog("unresolveComment payload", { id: commentId });
         this.commentManager.unresolveComment(commentId);
         await this.onCommentsChanged("Comment reopened!");
     }
