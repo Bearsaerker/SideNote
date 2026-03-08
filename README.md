@@ -2,6 +2,8 @@
 
 SideNote is a plugin for [Obsidian](https://obsidian.md) that allows you to add comments to your notes. These comments are displayed in a dedicated side pane, making it easy to review and navigate annotations without cluttering the main text. Comments are highlighted directly in the editor for quick visual reference.
 
+For local development and debug workflow, see [README-dev.md](./README-dev.md).
+
 ## Features
 
 ### Core Features

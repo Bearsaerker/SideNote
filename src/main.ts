@@ -2,6 +2,12 @@ import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateRes
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
+import { debugCount, debugLog, setDebugMarker } from "./runtime/debug";
+import { isDebugEnabled } from "./runtime/flags";
+import { startDevAutoReloadWatcher } from "./runtime/devAutoReload";
+import { buildMarkdownBlock as buildCommentMarkdownBlock, removeMarkdownCommentBlock, replaceMarkdownCommentBlock } from "./core/markdownCommentBlocks";
+import { bindModalActionHandlers } from "./core/modalActionBindings";
+import { SubmitExecutionGuard } from "./core/submitExecutionGuard";
 
 // Helper function to generate SHA256 hash using Web Crypto API (works on mobile)
 async function generateHash(text: string): Promise<string> {
@@ -30,6 +36,21 @@ async function generateHash(text: string): Promise<string> {
             return Math.abs(hash).toString(16);
         }
     }
+}
+
+function generateCommentId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+    try {
+        const nodeCrypto = require('crypto');
+        if (typeof nodeCrypto.randomUUID === "function") {
+            return nodeCrypto.randomUUID();
+        }
+    } catch {
+        // ignore and use fallback below
+    }
+    return `sn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // Define a state effect to trigger decoration updates
@@ -65,7 +86,7 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
 class SideNoteView extends ItemView {
     private file: TFile | null = null;
     private plugin: SideNote;
-    private activeCommentTimestamp: number | null = null;
+    private activeCommentId: string | null = null;
 
     constructor(leaf: WorkspaceLeaf, plugin: SideNote, file: TFile | null = null) {
         super(leaf);
@@ -117,12 +138,12 @@ class SideNoteView extends ItemView {
     /**
      * Highlight and scroll to a specific comment
      */
-    public highlightComment(timestamp: number) {
-        this.activeCommentTimestamp = timestamp;
+    public highlightComment(commentId: string) {
+        this.activeCommentId = commentId;
         this.renderComments();
         // Scroll to the highlighted comment
         setTimeout(() => {
-            const commentEl = this.containerEl.querySelector(`[data-comment-timestamp="${timestamp}"]`);
+            const commentEl = this.containerEl.querySelector(`[data-comment-id="${commentId}"]`);
             if (commentEl) {
                 commentEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
@@ -156,7 +177,7 @@ class SideNoteView extends ItemView {
                 const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
                 commentsForFile.forEach((comment) => {
                     const commentEl = commentsContainer.createDiv("sidenote-comment-item");
-                    commentEl.setAttribute("data-comment-timestamp", comment.timestamp.toString());
+                    commentEl.setAttribute("data-comment-id", comment.id);
 
                     // Add resolved class if comment is resolved
                     if (comment.resolved) {
@@ -164,7 +185,7 @@ class SideNoteView extends ItemView {
                     }
 
                     // Highlight active comment
-                    if (this.activeCommentTimestamp === comment.timestamp) {
+                    if (this.activeCommentId === comment.id) {
                         commentEl.addClass("active");
                     }
 
@@ -258,8 +279,8 @@ class SideNoteView extends ItemView {
                     editOption.onclick = (e) => {
                         e.stopPropagation();
                         menuContainer.classList.remove("visible");
-                        new CommentModal(this.app, (editedComment) => {
-                            this.plugin.editComment(comment.timestamp, editedComment);
+                        new CommentModal(this.app, async (editedComment) => {
+                            await this.plugin.editComment(comment.id, editedComment);
                         }, comment.comment).open();
                     };
 
@@ -268,7 +289,7 @@ class SideNoteView extends ItemView {
                         e.stopPropagation();
                         menuContainer.classList.remove("visible");
                         new ConfirmDeleteModal(this.app, () => {
-                            this.plugin.deleteComment(comment.timestamp);
+                            this.plugin.deleteComment(comment.id);
                         }).open();
                     };
 
@@ -281,9 +302,9 @@ class SideNoteView extends ItemView {
                         e.stopPropagation();
                         menuContainer.classList.remove("visible");
                         if (comment.resolved) {
-                            this.plugin.unresolveComment(comment.timestamp);
+                            this.plugin.unresolveComment(comment.id);
                         } else {
-                            this.plugin.resolveComment(comment.timestamp);
+                            this.plugin.resolveComment(comment.id);
                         }
                     };
 
@@ -393,11 +414,15 @@ class ConfirmDeleteModal extends Modal {
 
 class CommentModal extends Modal {
     comment: string;
-    onSubmit: (comment: string) => void;
+    onSubmit: (comment: string) => void | Promise<void>;
     initialComment: string;
     private textareaEl: HTMLTextAreaElement | null = null;
+    private submitButtonEl: HTMLButtonElement | null = null;
+    private cancelButtonEl: HTMLButtonElement | null = null;
+    private readonly submitGuard = new SubmitExecutionGuard(400);
+    private readonly debugModalId = generateCommentId();
 
-    constructor(app: App, onSubmit: (comment: string) => void, initialComment: string = '') {
+    constructor(app: App, onSubmit: (comment: string) => void | Promise<void>, initialComment: string = '') {
         super(app);
         this.onSubmit = onSubmit;
         this.initialComment = initialComment;
@@ -405,6 +430,7 @@ class CommentModal extends Modal {
 
     onOpen() {
         const { contentEl } = this;
+        debugLog("CommentModal.onOpen", { modalId: this.debugModalId, mode: this.initialComment ? "edit" : "add" });
         contentEl.addClass("sidenote-comment-modal");
 
         contentEl.createEl("h2", { text: this.initialComment ? "Edit comment" : "Add comment" });
@@ -421,12 +447,14 @@ class CommentModal extends Modal {
             // Cmd/Ctrl + Enter to save (for desktop/laptop users)
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
                 e.preventDefault();
-                this.submitComment();
+                void this.submitComment();
             }
             // Esc to cancel
             if (e.key === 'Escape') {
                 e.preventDefault();
-                this.close();
+                if (!this.submitGuard.isSubmitting()) {
+                    this.close();
+                }
             }
         });
 
@@ -435,32 +463,23 @@ class CommentModal extends Modal {
             text: "Cancel",
             cls: "sidenote-modal-cancel-btn"
         });
+        this.cancelButtonEl = cancelButton;
 
         const handleCancel = () => {
             this.close();
         };
 
-        // Use both event handlers for maximum compatibility
-        cancelButton.onclick = handleCancel;
-        cancelButton.addEventListener('click', handleCancel, false);
-        cancelButton.addEventListener('touchstart', (e: TouchEvent) => {
-            e.preventDefault();
-        }, false);
-        cancelButton.addEventListener('touchend', (e: TouchEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleCancel();
-        }, false);
-
-        const button = footer.createEl("button", {
+        const submitButton = footer.createEl("button", {
             text: this.initialComment ? "Save" : "Add",
             cls: "mod-cta sidenote-modal-submit-btn"
         });
+        this.submitButtonEl = submitButton;
 
         // Prevent focus on button
-        button.setAttribute('type', 'button');
+        submitButton.setAttribute('type', 'button');
 
         const handleSubmit = async () => {
+            debugCount(`handleSubmit click/touch modal=${this.debugModalId}`);
             // Blur the input to hide keyboard
             if (this.textareaEl) {
                 this.textareaEl.blur();
@@ -468,17 +487,19 @@ class CommentModal extends Modal {
             await this.submitComment();
         };
 
-        // Use both event handlers for maximum compatibility
-        button.onclick = handleSubmit;
-        button.addEventListener('click', handleSubmit, false);
-        button.addEventListener('touchstart', (e: TouchEvent) => {
-            e.preventDefault();
-        }, false);
-        button.addEventListener('touchend', (e: TouchEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleSubmit();
-        }, false);
+        bindModalActionHandlers({
+            submitButton,
+            cancelButton,
+            submitGuard: this.submitGuard,
+            onSubmitTriggered: handleSubmit,
+            onCancelTriggered: handleCancel,
+            onDebounceSuppressed: (deltaMs: number) => {
+                debugLog("handleSubmit suppressed by debounce", {
+                    modalId: this.debugModalId,
+                    deltaMs,
+                });
+            },
+        });
 
         // Set focus after short delay to ensure modal is fully rendered
         setTimeout(() => {
@@ -501,24 +522,54 @@ class CommentModal extends Modal {
     }
 
     async submitComment() {
-        if (this.textareaEl) {
-            this.comment = this.textareaEl.value;
-            try {
-                this.onSubmit(this.comment);
-            } catch (error) {
-                new Notice("Error: Failed to save comment");
-                console.error("Error in onSubmit:", error);
-                return;
-            }
-            this.close();
-        } else {
+        debugCount(`submitComment entry modal=${this.debugModalId}`);
+        if (!this.textareaEl) {
             new Notice("Error: Comment field is empty");
+            debugLog("submitComment missing textarea", { modalId: this.debugModalId });
+            return;
+        }
+
+        if (!this.submitGuard.tryStartSubmit()) {
+            debugLog("submitComment blocked by isSubmitting", { modalId: this.debugModalId });
+            return;
+        }
+
+        if (this.submitButtonEl) {
+            this.submitButtonEl.disabled = true;
+        }
+        if (this.cancelButtonEl) {
+            this.cancelButtonEl.disabled = true;
+        }
+
+        this.comment = this.textareaEl.value;
+        try {
+            debugLog("submitComment awaiting onSubmit", { modalId: this.debugModalId, length: this.comment.length });
+            await this.onSubmit(this.comment);
+            debugLog("submitComment onSubmit resolved", { modalId: this.debugModalId });
+            this.close();
+        } catch (error) {
+            new Notice("Error: Failed to save comment");
+            console.error("Error in onSubmit:", error);
+        } finally {
+            this.submitGuard.finishSubmit();
+            if (this.submitButtonEl) {
+                this.submitButtonEl.disabled = false;
+            }
+            if (this.cancelButtonEl) {
+                this.cancelButtonEl.disabled = false;
+            }
+            debugLog("submitComment finally", { modalId: this.debugModalId, isSubmitting: this.submitGuard.isSubmitting() });
         }
     }
 
     onClose() {
         const { contentEl } = this;
+        debugLog("CommentModal.onClose", { modalId: this.debugModalId });
         contentEl.empty();
+        this.textareaEl = null;
+        this.submitButtonEl = null;
+        this.cancelButtonEl = null;
+        this.submitGuard.reset();
         // Restore body scroll
         document.body.style.overflow = '';
     }
@@ -677,6 +728,21 @@ export default class SideNote extends Plugin {
     settings: SideNoteSettings;
     comments: Comment[] = [];
     private editorUpdateTimers: Record<string, number> = {};
+    private readonly duplicateAddWindowMs = 800;
+    private lastAddFingerprint: { key: string; at: number } | null = null;
+
+    private registerFreshSettingTab(): void {
+        const appWithSettings = this.app as App & {
+            setting?: { pluginTabs?: Record<string, PluginSettingTab> };
+        };
+
+        const pluginTabs = appWithSettings.setting?.pluginTabs;
+        if (pluginTabs && pluginTabs[this.manifest.id]) {
+            delete pluginTabs[this.manifest.id];
+        }
+
+        this.addSettingTab(new SideNoteSettingTab(this.app, this));
+    }
 
     /** Ensure markdown comment folder exists and return normalized path */
     private async ensureCommentFolder(): Promise<string> {
@@ -698,16 +764,15 @@ export default class SideNote extends Plugin {
     }
 
     /** Build markdown block with marker */
-    private buildMarkdownBlock(excerpt: string, body: string, timestamp: number): string {
-        const safeExcerpt = excerpt || "(no excerpt)";
-        return `## ${safeExcerpt}\n<!-- side-note:${timestamp} -->\n${body}\n\n---`;
+    private buildMarkdownBlock(excerpt: string, body: string, commentId: string): string {
+        return buildCommentMarkdownBlock(excerpt, body, commentId);
     }
 
     /** Write or append comment to markdown file and return path */
-    private async writeCommentToMarkdown(notePath: string, excerpt: string, body: string, timestamp: number): Promise<string> {
+    private async writeCommentToMarkdown(notePath: string, excerpt: string, body: string, commentId: string): Promise<string> {
         const folder = await this.ensureCommentFolder();
         const filePath = this.getSideNoteFilePath(notePath);
-        const block = this.buildMarkdownBlock(excerpt, body, timestamp);
+        const block = this.buildMarkdownBlock(excerpt, body, commentId);
 
         const existing = this.app.vault.getAbstractFileByPath(filePath);
         if (existing instanceof TFile) {
@@ -722,37 +787,44 @@ export default class SideNote extends Plugin {
         return filePath;
     }
 
-    /** Update markdown block by timestamp */
+    /** Update markdown block by id (fallback to legacy timestamp marker) */
     private async updateMarkdownComment(comment: Comment, newBody: string): Promise<void> {
         const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
         const file = this.app.vault.getAbstractFileByPath(filePath);
         if (!(file instanceof TFile)) return;
         const content = await this.app.vault.read(file);
-        const marker = `<!-- side-note:${comment.timestamp} -->`;
-        // Match from heading line through marker and body up to next --- separator or EOF
-        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?=\n---\n|$)`, "m");
-        if (!blockRegex.test(content)) return;
-        const replacement = this.buildMarkdownBlock(comment.selectedText, newBody, comment.timestamp);
-        const updated = content.replace(blockRegex, replacement);
+        const updated = replaceMarkdownCommentBlock(content, comment, newBody);
+        if (updated === content) return;
         await this.app.vault.modify(file, updated);
     }
 
-    /** Delete markdown block by timestamp */
+    /** Delete markdown block by id (fallback to legacy timestamp marker) */
     private async deleteMarkdownComment(comment: Comment): Promise<void> {
         const filePath = comment.commentPath || this.getSideNoteFilePath(comment.filePath);
         const file = this.app.vault.getAbstractFileByPath(filePath);
         if (!(file instanceof TFile)) return;
         const content = await this.app.vault.read(file);
-        const marker = `<!-- side-note:${comment.timestamp} -->`;
-        // Remove the matched block; allow beginning-of-file and Windows newlines
-        const blockRegex = new RegExp(`(^|\n)## .*?\n${marker}\n[^]*?(?:\n---\n|$)`, "m");
-        if (!blockRegex.test(content)) return;
-        const updated = content.replace(blockRegex, "").trim();
-        await this.app.vault.modify(file, updated.length ? updated + "\n" : "");
+        const updated = removeMarkdownCommentBlock(content, comment);
+        if (updated === content) return;
+        await this.app.vault.modify(file, updated);
     }
 
     async onload() {
         await this.loadPluginData(); // Load all data
+
+        if (isDebugEnabled()) {
+            const marker = setDebugMarker(this.manifest.version, this.manifest.id);
+            if (marker) {
+                new Notice(`SideNote debug loaded (${marker.loadedAt})`);
+            }
+        }
+
+        startDevAutoReloadWatcher({
+            app: this.app,
+            pluginId: this.manifest.id,
+            registerInterval: (intervalId: number) => this.registerInterval(intervalId),
+        });
+
         this.commentManager = new CommentManager(this.comments);
 
         // Migrate existing comments: add missing hashes and initialize isOrphaned flag
@@ -764,7 +836,7 @@ export default class SideNote extends Plugin {
         // Also highlight commented text inside rendered Markdown (Live Preview/Reading view)
         this.registerMarkdownPreviewHighlights();
 
-        this.addSettingTab(new SideNoteSettingTab(this.app, this));
+        this.registerFreshSettingTab();
 
         this.registerView("sidenote-view", (leaf) => new SideNoteView(leaf, this));
 
@@ -799,6 +871,7 @@ export default class SideNote extends Plugin {
                     new CommentModal(this.app, async (comment) => {
                         const selectedTextHash = await generateHash(selection);
                         const newComment: Comment = {
+                            id: generateCommentId(),
                             filePath: filePath,
                             startLine: cursorStart.line,
                             startChar: cursorStart.ch,
@@ -810,7 +883,7 @@ export default class SideNote extends Plugin {
                             timestamp: Date.now(),
                             isOrphaned: false,
                         };
-                        this.addComment(newComment);
+                        await this.addComment(newComment);
                     }).open();
                 } else {
                     new Notice("Please select some text to add a comment.");
@@ -837,6 +910,7 @@ export default class SideNote extends Plugin {
                                     new CommentModal(this.app, async (comment) => {
                                         const selectedTextHash = await generateHash(selection);
                                         const newComment: Comment = {
+                                            id: generateCommentId(),
                                             filePath: filePath,
                                             startLine: cursorStart.line,
                                             startChar: cursorStart.ch,
@@ -848,7 +922,7 @@ export default class SideNote extends Plugin {
                                             timestamp: Date.now(),
                                             isOrphaned: false,
                                         };
-                                        this.addComment(newComment);
+                                        await this.addComment(newComment);
                                     }).open();
                                 } else {
                                     new Notice("Please select some text to add a comment.");
@@ -905,6 +979,7 @@ export default class SideNote extends Plugin {
                     (file instanceof TFile && file.name === 'data.json' && file.parent?.name === 'side-note')) {
                     try {
                         await this.loadPluginData();
+                        await this.migrateComments();
                         this.commentManager.updateComments(this.comments);
                         // Re-render views
                         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
@@ -963,13 +1038,13 @@ export default class SideNote extends Plugin {
     /**
      * Activate the Side Note view and highlight a specific comment
      */
-    async activateViewAndHighlightComment(timestamp: number) {
+    async activateViewAndHighlightComment(commentId: string) {
         await this.activateView();
         // Find the SideNoteView and highlight the comment
         const leaves = this.app.workspace.getLeavesOfType("sidenote-view");
         leaves.forEach(leaf => {
             if (leaf.view instanceof SideNoteView) {
-                leaf.view.highlightComment(timestamp);
+                leaf.view.highlightComment(commentId);
             }
         });
     }
@@ -1007,6 +1082,7 @@ export default class SideNote extends Plugin {
     }
 
     async onCommentsChanged(message: string) {
+        debugCount(`onCommentsChanged ${message}`);
         await this.saveData();
         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
             if (leaf.view instanceof SideNoteView) {
@@ -1018,32 +1094,67 @@ export default class SideNote extends Plugin {
         new Notice(message);
     }
 
+    private createAddFingerprint(comment: Comment): string {
+        return [
+            comment.filePath,
+            comment.startLine,
+            comment.startChar,
+            comment.endLine,
+            comment.endChar,
+            comment.selectedText,
+            comment.comment,
+        ].join("|");
+    }
+
     async addComment(newComment: Comment) {
-        this.commentManager.addComment(newComment);
-        void this.onCommentsChanged("Comment added!");
-    }
-
-    async editComment(timestamp: number, newCommentText: string) {
-        const existing = this.commentManager.getComments().find(c => c.timestamp === timestamp);
-        if (existing) {
-            existing.comment = newCommentText;
+        debugCount("addComment");
+        debugLog("addComment payload", { id: newComment.id, filePath: newComment.filePath, timestamp: newComment.timestamp });
+        const now = Date.now();
+        const fingerprint = this.createAddFingerprint(newComment);
+        if (
+            this.lastAddFingerprint &&
+            this.lastAddFingerprint.key === fingerprint &&
+            now - this.lastAddFingerprint.at < this.duplicateAddWindowMs
+        ) {
+            debugCount("addComment suppressed duplicate-window");
+            debugLog("addComment suppressed duplicate-window", {
+                id: newComment.id,
+                windowMs: this.duplicateAddWindowMs,
+                deltaMs: now - this.lastAddFingerprint.at,
+            });
+            return;
         }
-        void this.onCommentsChanged("Comment updated!");
+        this.lastAddFingerprint = { key: fingerprint, at: now };
+        this.commentManager.addComment(newComment);
+        await this.onCommentsChanged("Comment added!");
     }
 
-    async deleteComment(timestamp: number) {
-        this.commentManager.deleteComment(timestamp);
-        void this.onCommentsChanged("Comment deleted!");
+    async editComment(commentId: string, newCommentText: string) {
+        debugCount("editComment");
+        debugLog("editComment payload", { id: commentId, length: newCommentText.length });
+        this.commentManager.editComment(commentId, newCommentText);
+        await this.onCommentsChanged("Comment updated!");
     }
 
-    async resolveComment(timestamp: number) {
-        this.commentManager.resolveComment(timestamp);
-        void this.onCommentsChanged("Comment resolved!");
+    async deleteComment(commentId: string) {
+        debugCount("deleteComment");
+        debugLog("deleteComment payload", { id: commentId });
+        this.commentManager.deleteComment(commentId);
+        await this.onCommentsChanged("Comment deleted!");
     }
 
-    async unresolveComment(timestamp: number) {
-        this.commentManager.unresolveComment(timestamp);
-        void this.onCommentsChanged("Comment reopened!");
+    async resolveComment(commentId: string) {
+        debugCount("resolveComment");
+        debugLog("resolveComment payload", { id: commentId });
+        this.commentManager.resolveComment(commentId);
+        await this.onCommentsChanged("Comment resolved!");
+    }
+
+    async unresolveComment(commentId: string) {
+        debugCount("unresolveComment");
+        debugLog("unresolveComment payload", { id: commentId });
+        this.commentManager.unresolveComment(commentId);
+        await this.onCommentsChanged("Comment reopened!");
     }
 
     async loadPluginData() {
@@ -1068,6 +1179,11 @@ export default class SideNote extends Plugin {
         let needsSave = false;
 
         for (const comment of this.comments) {
+            // Backfill missing id for legacy comments
+            if (!comment.id) {
+                comment.id = generateCommentId();
+                needsSave = true;
+            }
             // Add missing selectedTextHash
             if (!comment.selectedTextHash && comment.selectedText) {
                 comment.selectedTextHash = await generateHash(comment.selectedText);
@@ -1082,7 +1198,7 @@ export default class SideNote extends Plugin {
 
         if (needsSave) {
             await this.saveData();
-            console.log("Migrated comments: added hashes and initialized flags");
+            console.log("Migrated comments: backfilled ids/hashes and initialized flags");
         }
     }
 
@@ -1093,7 +1209,7 @@ export default class SideNote extends Plugin {
         let changed = false;
         for (const comment of this.comments) {
             if (!comment.commentPath) {
-                const path = await this.writeCommentToMarkdown(comment.filePath, comment.selectedText, comment.comment, comment.timestamp);
+                const path = await this.writeCommentToMarkdown(comment.filePath, comment.selectedText, comment.comment, comment.id);
                 comment.commentPath = path;
                 changed = true;
             }
@@ -1183,11 +1299,11 @@ export default class SideNote extends Plugin {
 
                     const span = document.createElement('span');
                     span.classList.add('sidenote-highlight', 'sidenote-highlight-preview');
-                    span.dataset.commentTimestamp = wrap.comment.timestamp.toString();
+                    span.dataset.commentId = wrap.comment.id;
                     span.addEventListener('click', (event: MouseEvent) => {
                         // Only handle primary button clicks; let other interactions (context menu, selections) flow
                         if (event.button !== 0) return;
-                        void this.activateViewAndHighlightComment(wrap.comment.timestamp);
+                        void this.activateViewAndHighlightComment(wrap.comment.id);
                     });
 
                     // Ensure browser/Obsidian context menus still work on right-click
@@ -1301,11 +1417,10 @@ export default class SideNote extends Plugin {
                 // Check if clicked on a highlight
                 const highlight = target.closest('.sidenote-highlight');
                 if (highlight) {
-                    const timestampStr = highlight.getAttribute('data-comment-timestamp');
-                    if (timestampStr) {
-                        const timestamp = parseInt(timestampStr, 10);
+                    const commentId = highlight.getAttribute('data-comment-id');
+                    if (commentId) {
                         // Open sidebar if not open and highlight the comment
-                        plugin.activateViewAndHighlightComment(timestamp);
+                        plugin.activateViewAndHighlightComment(commentId);
                     }
                 }
             }
@@ -1369,7 +1484,7 @@ export default class SideNote extends Plugin {
                                         decoration: Decoration.mark({
                                             class: 'sidenote-highlight',
                                             attributes: {
-                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                'data-comment-id': comment.id
                                             }
                                         })
                                     });
@@ -1404,7 +1519,7 @@ export default class SideNote extends Plugin {
                                                         decoration: Decoration.mark({
                                                             class: 'sidenote-highlight',
                                                             attributes: {
-                                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                                'data-comment-id': comment.id
                                                             }
                                                         })
                                                     });
@@ -1435,7 +1550,7 @@ export default class SideNote extends Plugin {
                                         decoration: Decoration.mark({
                                             class: 'sidenote-highlight',
                                             attributes: {
-                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                'data-comment-id': comment.id
                                             }
                                         })
                                     });
@@ -1460,7 +1575,7 @@ export default class SideNote extends Plugin {
                                         decoration: Decoration.mark({
                                             class: 'sidenote-highlight orphaned',
                                             attributes: {
-                                                'data-comment-timestamp': comment.timestamp.toString()
+                                                'data-comment-id': comment.id
                                             }
                                         })
                                     });
