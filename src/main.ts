@@ -892,6 +892,8 @@ export default class SideNote extends Plugin {
 
         if (!targetNodeId) return false;
 
+        console.log('[SideNote] Navigating to lineage node:', targetNodeId, 'with text:', searchText);
+
         // Navigate to the node
         this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
         view.viewStore.dispatch({
@@ -899,7 +901,40 @@ export default class SideNote extends Plugin {
             payload: { id: targetNodeId }
         });
 
+        // Register highlight with Lineage's rendering pipeline
+        this.registerLineageHighlight(targetNodeId!, searchText, comment);
+
         return true;
+    }
+
+    /**
+     * Register a highlight with Lineage's rendering pipeline.
+     * This replaces the old DOM-based highlighting approach.
+     */
+    private registerLineageHighlight(nodeId: string, searchText: string, comment: Comment): void {
+        const lineagePlugin = (this.app as any).plugins?.plugins?.['lineage'];
+        if (!lineagePlugin || !lineagePlugin.registerNodeHighlights) {
+            console.log('[SideNote] Lineage plugin not available or does not support highlights');
+            return;
+        }
+
+        console.log('[SideNote] Registering highlight for node:', nodeId, 'text:', searchText);
+
+        // Register the highlight with Lineage
+        lineagePlugin.registerNodeHighlights(nodeId, [{
+            id: comment.id,
+            className: 'sidenote-highlight sidenote-highlight-preview',
+            text: searchText,
+            onClick: () => {
+                void this.activateViewAndHighlightComment(comment.id);
+            },
+        }]);
+
+        // Auto-clear highlight after 3 seconds
+        setTimeout(() => {
+            console.log('[SideNote] Clearing highlight for node:', nodeId);
+            lineagePlugin.clearNodeHighlights(nodeId);
+        }, 3000);
     }
 
     async onload() {
