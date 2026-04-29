@@ -173,6 +173,11 @@ class SideNoteView extends ItemView {
         const actionsEl = headerEl.createDiv("sidenote-comment-actions");
 
         commentEl.onclick = async () => {
+            // First, try to navigate via Lineage if the file is open in a lineage view
+            const lineageNavigated = await this.plugin.tryNavigateToLineageNode(comment);
+            if (lineageNavigated) return;
+
+            // Fall back to standard Markdown view navigation
             let targetLeaf: WorkspaceLeaf | null = null;
             this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
                 if (leaf.view instanceof MarkdownView && leaf.view.file?.path === comment.filePath) {
@@ -829,6 +834,72 @@ export default class SideNote extends Plugin {
         const updated = removeMarkdownCommentBlock(content, comment);
         if (updated === content) return;
         await this.app.vault.modify(file, updated);
+    }
+
+    /**
+     * Try to navigate to the comment's location in a Lineage view.
+     * Returns true if navigation was successful, false otherwise.
+     */
+    async tryNavigateToLineageNode(comment: Comment): Promise<boolean> {
+        // Check if lineage plugin is loaded
+        const lineagePlugin = (this.app as any).plugins?.plugins?.['lineage'];
+        if (!lineagePlugin) return false;
+
+        // Find a lineage view showing the target file
+        const lineageLeaves = this.app.workspace.getLeavesOfType('lineage');
+        let targetLeaf: WorkspaceLeaf | null = null;
+
+        for (const leaf of lineageLeaves) {
+            const view = leaf.view as any;
+            if (view?.file?.path === comment.filePath) {
+                targetLeaf = leaf;
+                break;
+            }
+        }
+
+        if (!targetLeaf) return false;
+
+        const view = targetLeaf.view as any;
+        const documentStore = view.documentStore;
+        if (!documentStore) return false;
+
+        // Get the document content (Record<nodeId, { content: string }>)
+        const documentState = documentStore.getValue();
+        const content: Record<string, { content: string }> = documentState.document.content;
+
+        // Find the node containing the selected text
+        let targetNodeId: string | null = null;
+        const searchText = comment.selectedText;
+
+        // First try exact match
+        for (const [nodeId, nodeData] of Object.entries(content)) {
+            if (nodeData.content.includes(searchText)) {
+                targetNodeId = nodeId;
+                break;
+            }
+        }
+
+        // If exact match not found, try case-insensitive search
+        if (!targetNodeId && searchText) {
+            const lowerSearch = searchText.toLowerCase();
+            for (const [nodeId, nodeData] of Object.entries(content)) {
+                if (nodeData.content.toLowerCase().includes(lowerSearch)) {
+                    targetNodeId = nodeId;
+                    break;
+                }
+            }
+        }
+
+        if (!targetNodeId) return false;
+
+        // Navigate to the node
+        this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+        view.viewStore.dispatch({
+            type: 'view/set-active-node/mouse',
+            payload: { id: targetNodeId }
+        });
+
+        return true;
     }
 
     async onload() {
