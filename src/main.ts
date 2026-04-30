@@ -173,53 +173,66 @@ class SideNoteView extends ItemView {
         const actionsEl = headerEl.createDiv("sidenote-comment-actions");
 
         commentEl.onclick = async () => {
-            // First, try to navigate via Lineage if the file is open in a lineage view
-            const lineageNavigated = await this.plugin.tryNavigateToLineageNode(comment);
-            if (lineageNavigated) return;
+            try {
+                console.debug('[SideNote DEBUG] commentEl.onclick fired for comment:', comment.id, 'filePath:', comment.filePath);
+                // First, try to navigate via Lineage if the file is open in a lineage view
+                const lineageNavigated = await this.plugin.tryNavigateToLineageNode(comment);
+                console.debug('[SideNote DEBUG] lineageNavigated:', lineageNavigated);
+                if (lineageNavigated) return;
 
-            // Fall back to standard Markdown view navigation
-            let targetLeaf: WorkspaceLeaf | null = null;
-            this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
-                if (leaf.view instanceof MarkdownView && leaf.view.file?.path === comment.filePath) {
-                    targetLeaf = leaf;
-                    return false;
+                // Fall back to standard Markdown view navigation
+                console.debug('[SideNote DEBUG] Falling back to standard Markdown view navigation');
+                let targetLeaf: WorkspaceLeaf | null = null;
+                this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
+                    if (leaf.view instanceof MarkdownView && leaf.view.file?.path === comment.filePath) {
+                        targetLeaf = leaf;
+                        return false;
+                    }
+                });
+
+                if (!targetLeaf) {
+                    const file = this.app.vault.getAbstractFileByPath(comment.filePath);
+                    if (file instanceof TFile) {
+                        const newLeaf = this.app.workspace.getLeaf(true);
+                        await newLeaf.openFile(file);
+                        targetLeaf = newLeaf;
+                    }
                 }
-            });
 
-            if (!targetLeaf) {
-                const file = this.app.vault.getAbstractFileByPath(comment.filePath);
-                if (file instanceof TFile) {
-                    const newLeaf = this.app.workspace.getLeaf(true);
-                    await newLeaf.openFile(file);
-                    targetLeaf = newLeaf;
+                if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
+                    this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+                    const editor = targetLeaf.view.editor;
+
+                    editor.setSelection(
+                        { line: comment.startLine, ch: comment.startChar },
+                        { line: comment.endLine, ch: comment.endChar }
+                    );
+                    editor.scrollIntoView({
+                        from: { line: comment.startLine, ch: 0 },
+                        to: { line: comment.endLine, ch: 0 }
+                    }, true);
+                    editor.focus();
+                } else {
+                    new Notice("Failed to jump to Markdown view.");
                 }
-            }
-
-            if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
-                this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
-                const editor = targetLeaf.view.editor;
-
-                editor.setSelection(
-                    { line: comment.startLine, ch: comment.startChar },
-                    { line: comment.endLine, ch: comment.endChar }
-                );
-                editor.scrollIntoView({
-                    from: { line: comment.startLine, ch: 0 },
-                    to: { line: comment.endLine, ch: 0 }
-                }, true);
-                editor.focus();
-            } else {
-                new Notice("Failed to jump to Markdown view.");
+            } catch (e) {
+                console.error('[SideNote DEBUG] ERROR in commentEl.onclick:', e);
             }
         };
 
         const contentWrapper = commentEl.createDiv({ cls: "sidenote-comment-content" });
-        MarkdownRenderer.renderMarkdown(
-            comment.comment || "",
-            contentWrapper,
-            comment.filePath,
-            this.plugin
-        );
+        try {
+            console.debug('[SideNote DEBUG] MarkdownRenderer.renderMarkdown for comment:', comment.id, 'content length:', (comment.comment || '').length);
+            MarkdownRenderer.renderMarkdown(
+                comment.comment || "",
+                contentWrapper,
+                comment.filePath,
+                this.plugin
+            );
+            console.debug('[SideNote DEBUG] MarkdownRenderer.renderMarkdown done for comment:', comment.id);
+        } catch (e) {
+            console.error('[SideNote DEBUG] ERROR in MarkdownRenderer.renderMarkdown for comment:', comment.id, e);
+        }
 
         contentWrapper.addEventListener('click', (event: MouseEvent) => {
             const target = event.target as HTMLElement | null;
@@ -281,56 +294,64 @@ class SideNoteView extends ItemView {
     }
 
     public renderComments() { // Made public for settings tab to re-render
-        this.containerEl.empty();
-        this.containerEl.addClass("sidenote-view-container");
+        try {
+            console.debug('[SideNote DEBUG] renderComments called, file:', this.file?.path, 'showAllNotes:', this.showAllNotes);
+            this.containerEl.empty();
+            this.containerEl.addClass("sidenote-view-container");
 
-        const viewHeader = this.containerEl.createDiv("sidenote-view-header");
-        const toggleBtn = viewHeader.createEl("button", {
-            text: this.showAllNotes ? "Current File" : "All Notes",
-            cls: "sidenote-view-toggle",
-        });
-        toggleBtn.onclick = () => {
-            this.showAllNotes = !this.showAllNotes;
-            this.renderComments();
-        };
+            const viewHeader = this.containerEl.createDiv("sidenote-view-header");
+            const toggleBtn = viewHeader.createEl("button", {
+                text: this.showAllNotes ? "Current File" : "All Notes",
+                cls: "sidenote-view-toggle",
+            });
+            toggleBtn.onclick = () => {
+                this.showAllNotes = !this.showAllNotes;
+                this.renderComments();
+            };
 
-        if (this.showAllNotes) {
-            this.renderAllNotesView();
-            return;
-        }
-
-        if (this.file) {
-            let commentsForFile = this.plugin.commentManager.getCommentsForFile(this.file.path);
-
-            if (!this.plugin.settings.showResolvedComments) {
-                commentsForFile = commentsForFile.filter(c => !c.resolved);
+            if (this.showAllNotes) {
+                this.renderAllNotesView();
+                return;
             }
 
-            if (this.plugin.settings.commentSortOrder === "position") {
-                commentsForFile.sort((a, b) => {
-                    if (a.startLine === b.startLine) {
-                        return a.startChar - b.startChar;
-                    }
-                    return a.startLine - b.startLine;
-                });
-            } else {
-                commentsForFile.sort((a, b) => a.timestamp - b.timestamp);
-            }
+            if (this.file) {
+                let commentsForFile = this.plugin.commentManager.getCommentsForFile(this.file.path);
+                console.debug('[SideNote DEBUG] commentsForFile count:', commentsForFile.length);
 
-            if (commentsForFile.length > 0) {
-                const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
-                commentsForFile.forEach((comment) => {
-                    this.renderCommentItem(commentsContainer, comment);
-                });
+                if (!this.plugin.settings.showResolvedComments) {
+                    commentsForFile = commentsForFile.filter(c => !c.resolved);
+                }
+
+                if (this.plugin.settings.commentSortOrder === "position") {
+                    commentsForFile.sort((a, b) => {
+                        if (a.startLine === b.startLine) {
+                            return a.startChar - b.startChar;
+                        }
+                        return a.startLine - b.startLine;
+                    });
+                } else {
+                    commentsForFile.sort((a, b) => a.timestamp - b.timestamp);
+                }
+
+                if (commentsForFile.length > 0) {
+                    const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
+                    commentsForFile.forEach((comment) => {
+                        console.debug('[SideNote DEBUG] renderCommentItem for:', comment.id);
+                        this.renderCommentItem(commentsContainer, comment);
+                    });
+                } else {
+                    const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
+                    emptyStateEl.createEl("p", { text: "No comments for this file yet." });
+                    emptyStateEl.createEl("p", { text: "Select text in your note and use the 'add comment to selection' command to get started." });
+                }
             } else {
                 const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
-                emptyStateEl.createEl("p", { text: "No comments for this file yet." });
-                emptyStateEl.createEl("p", { text: "Select text in your note and use the 'add comment to selection' command to get started." });
+                emptyStateEl.createEl("p", { text: "No file selected." });
+                emptyStateEl.createEl("p", { text: "Open a file to see its comments." });
             }
-        } else {
-            const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
-            emptyStateEl.createEl("p", { text: "No file selected." });
-            emptyStateEl.createEl("p", { text: "Open a file to see its comments." });
+            console.debug('[SideNote DEBUG] renderComments done');
+        } catch (e) {
+            console.error('[SideNote DEBUG] ERROR in renderComments:', e);
         }
     }
 
@@ -755,6 +776,7 @@ export default class SideNote extends Plugin {
     settings: SideNoteSettings;
     comments: Comment[] = [];
     private editorUpdateTimers: Record<string, number> = {};
+    private modifyUpdateTimers: Record<string, number> = {};
     private readonly duplicateAddWindowMs = 800;
     private lastAddFingerprint: { key: string; at: number } | null = null;
 
@@ -841,103 +863,128 @@ export default class SideNote extends Plugin {
      * Returns true if navigation was successful, false otherwise.
      */
     async tryNavigateToLineageNode(comment: Comment): Promise<boolean> {
-        // Check if lineage plugin is loaded
-        const lineagePlugin = (this.app as any).plugins?.plugins?.['lineage'];
-        if (!lineagePlugin) return false;
+        try {
+            console.debug('[SideNote DEBUG] tryNavigateToLineageNode called for comment:', comment.id);
+            // Check if lineage plugin is loaded
+            const lineagePlugin = (this.app as any).plugins?.plugins?.['lineage'];
+            console.debug('[SideNote DEBUG] lineagePlugin available:', !!lineagePlugin);
+            if (!lineagePlugin) return false;
 
-        // Find a lineage view showing the target file
-        const lineageLeaves = this.app.workspace.getLeavesOfType('lineage');
-        let targetLeaf: WorkspaceLeaf | null = null;
+            // Find a lineage view showing the target file
+            const lineageLeaves = this.app.workspace.getLeavesOfType('lineage');
+            console.debug('[SideNote DEBUG] lineageLeaves count:', lineageLeaves.length);
+            let targetLeaf: WorkspaceLeaf | null = null;
 
-        for (const leaf of lineageLeaves) {
-            const view = leaf.view as any;
-            if (view?.file?.path === comment.filePath) {
-                targetLeaf = leaf;
-                break;
+            for (const leaf of lineageLeaves) {
+                const view = leaf.view as any;
+                console.debug('[SideNote DEBUG] lineage leaf view.file?.path:', view?.file?.path, 'vs comment.filePath:', comment.filePath);
+                if (view?.file?.path === comment.filePath) {
+                    targetLeaf = leaf;
+                    break;
+                }
             }
-        }
 
-        if (!targetLeaf) return false;
-
-        const view = targetLeaf.view as any;
-        const documentStore = view.documentStore;
-        if (!documentStore) return false;
-
-        // Get the document content (Record<nodeId, { content: string }>)
-        const documentState = documentStore.getValue();
-        const content: Record<string, { content: string }> = documentState.document.content;
-
-        // Find the node containing the selected text
-        let targetNodeId: string | null = null;
-        const searchText = comment.selectedText;
-
-        // First try exact match
-        for (const [nodeId, nodeData] of Object.entries(content)) {
-            if (nodeData.content.includes(searchText)) {
-                targetNodeId = nodeId;
-                break;
+            if (!targetLeaf) {
+                console.debug('[SideNote DEBUG] No targetLeaf found');
+                return false;
             }
-        }
 
-        // If exact match not found, try case-insensitive search
-        if (!targetNodeId && searchText) {
-            const lowerSearch = searchText.toLowerCase();
+            const view = targetLeaf.view as any;
+            console.debug('[SideNote DEBUG] view type:', view.constructor?.name);
+            const documentStore = view.documentStore;
+            console.debug('[SideNote DEBUG] documentStore available:', !!documentStore);
+            if (!documentStore) return false;
+
+            // Get the document content (Record<nodeId, { content: string }>)
+            const documentState = documentStore.getValue();
+            console.debug('[SideNote DEBUG] documentState keys:', Object.keys(documentState));
+            const content: Record<string, { content: string }> = documentState.document.content;
+            console.debug('[SideNote DEBUG] content node count:', Object.keys(content).length);
+
+            // Find the node containing the selected text
+            let targetNodeId: string | null = null;
+            const searchText = comment.selectedText;
+
+            // First try exact match
             for (const [nodeId, nodeData] of Object.entries(content)) {
-                if (nodeData.content.toLowerCase().includes(lowerSearch)) {
+                if (nodeData.content.includes(searchText)) {
                     targetNodeId = nodeId;
                     break;
                 }
             }
+
+            // If exact match not found, try case-insensitive search
+            if (!targetNodeId && searchText) {
+                const lowerSearch = searchText.toLowerCase();
+                for (const [nodeId, nodeData] of Object.entries(content)) {
+                    if (nodeData.content.toLowerCase().includes(lowerSearch)) {
+                        targetNodeId = nodeId;
+                        break;
+                    }
+                }
+            }
+
+            if (!targetNodeId) {
+                console.debug('[SideNote DEBUG] No targetNodeId found for searchText:', searchText);
+                return false;
+            }
+
+            console.debug('[SideNote DEBUG] Found targetNodeId:', targetNodeId);
+
+            // Navigate to the node
+            console.debug('[SideNote DEBUG] Calling setActiveLeaf...');
+            this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+            console.debug('[SideNote DEBUG] setActiveLeaf done, calling viewStore.dispatch...');
+            view.viewStore.dispatch({
+                type: 'view/set-active-node/mouse',
+                payload: { id: targetNodeId }
+            });
+            console.debug('[SideNote DEBUG] viewStore.dispatch done');
+
+            // Use Lineage's own search to highlight the sidenote text.
+            // This avoids registerNodeHighlights which triggers expensive re-renders.
+            // The search highlight is temporary — cleared after a few seconds.
+            this.highlightInLineageSearch(view, searchText, targetNodeId);
+
+            console.debug('[SideNote DEBUG] tryNavigateToLineageNode returning true');
+            return true;
+        } catch (e) {
+            console.error('[SideNote DEBUG] ERROR in tryNavigateToLineageNode:', e);
+            return false;
         }
-
-        if (!targetNodeId) return false;
-
-        console.log('[SideNote] Navigating to lineage node:', targetNodeId, 'with text:', searchText);
-
-        // Navigate to the node
-        this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
-        view.viewStore.dispatch({
-            type: 'view/set-active-node/mouse',
-            payload: { id: targetNodeId }
-        });
-
-        // Register highlight with Lineage's rendering pipeline
-        this.registerLineageHighlight(targetNodeId!, searchText, comment);
-
-        return true;
     }
 
     /**
-     * Register a highlight with Lineage's rendering pipeline.
-     * This replaces the old DOM-based highlighting approach.
+     * Temporarily set Lineage's search query to highlight sidenote text.
+     * Uses Lineage's own search infrastructure — no extra re-renders.
      */
-    private registerLineageHighlight(nodeId: string, searchText: string, comment: Comment): void {
-        const lineagePlugin = (this.app as any).plugins?.plugins?.['lineage'];
-        if (!lineagePlugin || !lineagePlugin.registerNodeHighlights) {
-            console.log('[SideNote] Lineage plugin not available or does not support highlights');
-            return;
-        }
+    private highlightInLineageSearch(view: any, searchText: string, _nodeId: string): void {
+        if (!view?.viewStore || !searchText) return;
 
-        console.log('[SideNote] Registering highlight for node:', nodeId, 'text:', searchText);
+        // Dispatch search query — Lineage's markdown previews already react to it
+        view.viewStore.dispatch({
+            type: 'view/search/set-query',
+            payload: { query: searchText },
+        });
 
-        // Register the highlight with Lineage
-        lineagePlugin.registerNodeHighlights(nodeId, [{
-            id: comment.id,
-            className: 'sidenote-highlight sidenote-highlight-preview',
-            text: searchText,
-            onClick: () => {
-                void this.activateViewAndHighlightComment(comment.id);
-            },
-        }]);
-
-        // Auto-clear highlight after 3 seconds
+        // Clear search after 4 seconds so it doesn't persist
         setTimeout(() => {
-            console.log('[SideNote] Clearing highlight for node:', nodeId);
-            lineagePlugin.clearNodeHighlights(nodeId);
-        }, 3000);
+            view.viewStore.dispatch({
+                type: 'view/search/set-query',
+                payload: { query: '' },
+            });
+        }, 4000);
     }
 
     async onload() {
+        // Global error handler to catch unhandled errors
+        window.addEventListener('error', (event) => {
+            console.error('[SideNote DEBUG] Global error caught:', event.error, event.filename, event.lineno);
+        });
+        window.addEventListener('unhandledrejection', (event) => {
+            console.error('[SideNote DEBUG] Unhandled promise rejection:', event.reason);
+        });
+
         await this.loadPluginData(); // Load all data
 
         this.commentManager = new CommentManager(this.comments);
@@ -1103,9 +1150,11 @@ export default class SideNote extends Plugin {
         // Update comments when files are modified (disk-level)
         this.registerEvent(
             this.app.vault.on('modify', async (file) => {
+                console.debug('[SideNote DEBUG] vault.on(modify) fired for:', file.path, 'file instanceof TFile:', file instanceof TFile);
                 // Handle data.json updates
                 if (file.path === '.obsidian/plugins/side-note/data.json' ||
                     (file instanceof TFile && file.name === 'data.json' && file.parent?.name === 'side-note')) {
+                    console.debug('[SideNote DEBUG] Reloading plugin data...');
                     try {
                         await this.loadPluginData();
                         await this.migrateComments();
@@ -1122,46 +1171,38 @@ export default class SideNote extends Plugin {
                 }
                 // Update comment coordinates when Markdown files are modified
                 else if (file instanceof TFile && file.extension === 'md') {
-                    try {
-                        const fileContent = await this.app.vault.read(file);
-                        this.commentManager.updateCommentCoordinatesForFile(fileContent, file.path);
-                        await this.saveData();
-                        // Re-render views if any comments were updated
-                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
-                            if (leaf.view instanceof SideNoteView) {
-                                leaf.view.renderComments();
-                            }
-                        });
-                    } catch (error) {
-                        console.error("Error updating comment coordinates:", error);
+                    // Debounce modify events to avoid cascade with editor-change
+                    const run = async () => {
+                        console.debug('[SideNote DEBUG] Updating comment coordinates for md file:', file.path);
+                        try {
+                            const fileContent = await this.app.vault.read(file);
+                            this.commentManager.updateCommentCoordinatesForFile(fileContent, file.path);
+                            // NOTE: saveData() is intentionally omitted here.
+                            // buildDecorations searches for text live in the current
+                            // document, so persisting coordinates on every edit is
+                            // unnecessary disk I/O that blocks the UI.
+                            // Coordinates are saved when the plugin unloads or
+                            // when comments are explicitly added/edited/deleted.
+                        } catch (error) {
+                            console.error("Error updating comment coordinates:", error);
+                        }
+                    };
+
+                    if (this.modifyUpdateTimers[file.path]) {
+                        window.clearTimeout(this.modifyUpdateTimers[file.path]);
                     }
+                    this.modifyUpdateTimers[file.path] = window.setTimeout(run, 500);
+                } else {
+                    console.debug('[SideNote DEBUG] vault.on(modify) ignored for:', file.path);
                 }
             })
         );
 
-        // Live editor change - refresh decorations without marking orphaned (safe for mobile)
-        this.registerEvent(
-            this.app.workspace.on('editor-change', (editor, info) => {
-                const filePath = info?.file?.path;
-                if (!filePath) return;
-
-                const run = () => {
-                    try {
-                        // Only refresh decorations; coordinates are updated on file save
-                        // This avoids marking comments as orphaned during active editing
-                        this.refreshEditorDecorations();
-                    } catch (e) {
-                        console.warn('Failed to refresh decorations on editor-change', e);
-                    }
-                };
-
-                // Debounce per file to avoid excessive work while typing
-                if (this.editorUpdateTimers[filePath]) {
-                    window.clearTimeout(this.editorUpdateTimers[filePath]);
-                }
-                this.editorUpdateTimers[filePath] = window.setTimeout(run, 250);
-            })
-        );
+        // NOTE: editor-change handler removed.
+        // buildDecorations already searches for comment.text live in the current
+        // document, so the ViewPlugin's docChanged trigger is sufficient.
+        // A global editor-change → refreshAll loop was the main cause of
+        // UI freezes when editing Lineage cards.
     }
 
     /**
@@ -1344,6 +1385,13 @@ export default class SideNote extends Plugin {
                 return; // Not in Reading view, skip
             }
 
+            // Skip Lineage plugin's markdown previews — they have their own
+            // highlight system and re-render on every card edit; running our
+            // DOM walker here adds significant latency to the Lineage UI.
+            if (previewContainer.closest('[data-lineage-card]')) {
+                return;
+            }
+
             if (!this.settings.showHighlights) return;
 
             const comments = this.commentManager
@@ -1423,10 +1471,20 @@ export default class SideNote extends Plugin {
                         /* intentionally empty to keep default behavior */
                     });
 
-                    range.surroundContents(span);
+                    // surroundContents throws when the range crosses element boundaries
+                    // (e.g. partially selects <strong>, <code>, <a> nodes).
+                    // For same-node ranges it works fine; for cross-node ranges use
+                    // extractContents + insertNode which handles all cases safely.
+                    if (startPos.node === endPos.node) {
+                        range.surroundContents(span);
+                    } else {
+                        const fragment = range.extractContents();
+                        span.appendChild(fragment);
+                        range.insertNode(span);
+                    }
                 } catch (e) {
                     // If the range crosses invalid boundaries, skip this wrap
-                    console.warn('Failed to wrap preview highlight', e);
+                    console.warn('[SideNote DEBUG] Failed to wrap preview highlight', e);
                     continue;
                 }
             }
@@ -1488,18 +1546,31 @@ export default class SideNote extends Plugin {
      * Refresh editor decorations for all open markdown views
      */
     refreshEditorDecorations() {
-        this.app.workspace.iterateAllLeaves((leaf) => {
-            if (leaf.view instanceof MarkdownView) {
-                const editor = leaf.view.editor;
-                // Force editor to refresh by dispatching the force update effect
-                if (editor && (editor as any).cm) {
-                    const cm = (editor as any).cm;
-                    if (cm.dispatch) {
-                        cm.dispatch({ effects: [forceUpdateEffect.of(null)] });
-                    }
+        try {
+            this.app.workspace.iterateAllLeaves((leaf) => {
+                // Skip Lineage views — dispatching effects on their editors
+                // triggers Lineage's re-render cycle and causes UI freezes
+                if (leaf.view instanceof MarkdownView && (leaf.view as any).type === 'lineage') {
+                    return;
                 }
-            }
-        });
+                if (!(leaf.view instanceof MarkdownView)) return;
+
+                const editor = leaf.view.editor;
+                if (!editor || !(editor as any).cm) return;
+
+                // Extra safety: skip any editor whose container is inside a Lineage view
+                const cmRoot = (editor as any).cm?.root as HTMLElement | undefined;
+                const container = cmRoot?.closest('.workspace-leaf') as HTMLElement | undefined;
+                if (container && container.classList.contains('lineage')) return;
+
+                const cm = (editor as any).cm;
+                if (cm.dispatch) {
+                    cm.dispatch({ effects: [forceUpdateEffect.of(null)] });
+                }
+            });
+        } catch (e) {
+            console.error('[SideNote DEBUG] ERROR in refreshEditorDecorations:', e);
+        }
     }
 
     /**
@@ -1510,13 +1581,28 @@ export default class SideNote extends Plugin {
         return ViewPlugin.fromClass(class {
             decorations: DecorationSet;
             view: EditorView;
+            private filePath: string | null = null;
 
             constructor(view: EditorView) {
                 this.view = view;
+                // Resolve filePath once at construction — avoids iterateAllLeaves on every rebuild
+                this.resolveFilePath(view);
                 this.decorations = this.buildDecorations(view);
 
                 // Add click event listener to handle highlight clicks
                 this.view.dom.addEventListener('click', this.handleClick.bind(this));
+            }
+
+            private resolveFilePath(view: EditorView) {
+                plugin.app.workspace.iterateAllLeaves((leaf) => {
+                    if (this.filePath) return; // already found
+                    if (leaf.view instanceof MarkdownView && leaf.view.file) {
+                        const editor = leaf.view.editor;
+                        if (editor && (editor as any).cm === view) {
+                            this.filePath = leaf.view.file.path;
+                        }
+                    }
+                });
             }
 
             destroy() {
@@ -1540,7 +1626,11 @@ export default class SideNote extends Plugin {
             update(update: ViewUpdate) {
                 // Rebuild decorations if document changed, viewport changed, or force update effect is present
                 if (update.docChanged || update.viewportChanged || update.transactions.some(tr => tr.effects.some(e => e.is(forceUpdateEffect)))) {
-                    this.decorations = this.buildDecorations(update.view);
+                    try {
+                        this.decorations = this.buildDecorations(update.view);
+                    } catch (e) {
+                        console.error('[SideNote DEBUG] ERROR in ViewPlugin update:', e);
+                    }
                 }
             }
 
@@ -1552,23 +1642,18 @@ export default class SideNote extends Plugin {
                     return builder.finish();
                 }
 
-                // Get the file associated with this specific EditorView
-                let filePath: string | null = null;
-                plugin.app.workspace.iterateAllLeaves((leaf) => {
-                    if (leaf.view instanceof MarkdownView && leaf.view.file) {
-                        const editor = leaf.view.editor;
-                        if (editor && (editor as any).cm === view) {
-                            filePath = leaf.view.file.path;
-                        }
-                    }
-                });
-
-                if (!filePath) return builder.finish();
+                // Fallback: if filePath wasn't resolved in constructor (timing issue),
+                // try again now — once found it stays cached
+                if (!this.filePath) {
+                    this.resolveFilePath(view);
+                    if (!this.filePath) return builder.finish();
+                }
 
                 const doc = view.state.doc;
                 const decorationsArray: Array<{from: number, to: number, decoration: Decoration}> = [];
 
-                const comments = plugin.commentManager.getCommentsForFile(filePath);
+                const comments = plugin.commentManager.getCommentsForFile(this.filePath);
+                console.debug('[SideNote DEBUG] buildDecorations comments count:', comments.length);
 
                 comments.forEach(comment => {
                     // Skip resolved comments (don't show highlights for resolved items)
@@ -1698,7 +1783,7 @@ export default class SideNote extends Plugin {
                         }
                     } catch (e) {
                         // Line might not exist, skip this comment
-                        console.warn('Failed to create decoration for comment:', e);
+                        console.warn('[SideNote DEBUG] Failed to create decoration for comment:', e);
                     }
                 });
 
@@ -1708,6 +1793,7 @@ export default class SideNote extends Plugin {
                     builder.add(from, to, decoration);
                 });
 
+                console.debug('[SideNote DEBUG] buildDecorations finished, decorations count:', decorationsArray.length);
                 return builder.finish();
             }
         }, {
