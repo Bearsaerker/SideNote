@@ -780,6 +780,14 @@ export default class SideNote extends Plugin {
     private readonly duplicateAddWindowMs = 800;
     private lastAddFingerprint: { key: string; at: number } | null = null;
 
+    // Global error handler references for cleanup
+    private errorHandler: ((event: ErrorEvent) => void) | null = null;
+    private rejectionHandler: ((event: PromiseRejectionEvent) => void) | null = null;
+    // Debounce state: track last logged error message and timestamp
+    private lastErrorMessage: string = '';
+    private lastErrorTime: number = 0;
+    private readonly errorDebounceMs = 5000;
+
     private registerFreshSettingTab(): void {
         const appWithSettings = this.app as App & {
             setting?: { pluginTabs?: Record<string, PluginSettingTab> };
@@ -977,13 +985,38 @@ export default class SideNote extends Plugin {
     }
 
     async onload() {
-        // Global error handler to catch unhandled errors
-        window.addEventListener('error', (event) => {
-            console.error('[SideNote DEBUG] Global error caught:', event.error, event.filename, event.lineno);
-        });
-        window.addEventListener('unhandledrejection', (event) => {
-            console.error('[SideNote DEBUG] Unhandled promise rejection:', event.reason);
-        });
+        // Global error handler to catch unhandled errors from this plugin only.
+        // Filters out third-party plugin errors (e.g., obsidian-citation-plugin)
+        // and debounces repeated identical errors to prevent console flooding
+        // and UI freezes.
+        this.errorHandler = (event) => {
+            // Only log errors originating from this plugin
+            if (!event.filename?.includes('plugin:side-note')) return;
+
+            const errorMsg = `${event.error?.message || 'Unknown error'} at ${event.filename}:${event.lineno}`;
+            const now = Date.now();
+            // Debounce: only log if different from last error or enough time passed
+            if (errorMsg !== this.lastErrorMessage || now - this.lastErrorTime > this.errorDebounceMs) {
+                console.error('[SideNote DEBUG] Global error caught:', event.error, event.filename, event.lineno);
+                this.lastErrorMessage = errorMsg;
+                this.lastErrorTime = now;
+            }
+        };
+        window.addEventListener('error', this.errorHandler);
+
+        this.rejectionHandler = (event) => {
+            // Only log rejections from this plugin's code
+            const reasonStr = String(event.reason || '');
+            if (!reasonStr.includes('plugin:side-note')) return;
+
+            const now = Date.now();
+            if (reasonStr !== this.lastErrorMessage || now - this.lastErrorTime > this.errorDebounceMs) {
+                console.error('[SideNote DEBUG] Unhandled promise rejection:', event.reason);
+                this.lastErrorMessage = reasonStr;
+                this.lastErrorTime = now;
+            }
+        };
+        window.addEventListener('unhandledrejection', this.rejectionHandler);
 
         await this.loadPluginData(); // Load all data
 
@@ -1171,11 +1204,28 @@ export default class SideNote extends Plugin {
                 }
                 // Update comment coordinates when Markdown files are modified
                 else if (file instanceof TFile && file.extension === 'md') {
-                    // Debounce modify events to avoid cascade with editor-change
+                    // Skip files with no associated comments — avoids unnecessary
+                    // vault.read() calls that can time out during rapid file
+                    // operations (e.g., Lineage card splits).
+                    const commentsForFile = this.commentManager.getCommentsForFile(file.path);
+                    if (!commentsForFile.length) {
+                        return;
+                    }
+
+                    // Debounce modify events to avoid cascade with editor-change.
+                    // Use a longer delay (1500ms) to give third-party plugins like
+                    // Lineage time to finish their file operations before we read.
                     const run = async () => {
                         console.debug('[SideNote DEBUG] Updating comment coordinates for md file:', file.path);
                         try {
-                            const fileContent = await this.app.vault.read(file);
+                            // Wrap vault.read() in a timeout to prevent indefinite hangs
+                            // when the file is still being written by another process.
+                            const fileContent = await Promise.race([
+                                this.app.vault.read(file),
+                                new Promise<string>((_, reject) =>
+                                    setTimeout(() => reject(new Error('vault.read() timed out (5s)')), 5000)
+                                ),
+                            ]);
                             this.commentManager.updateCommentCoordinatesForFile(fileContent, file.path);
                             // NOTE: saveData() is intentionally omitted here.
                             // buildDecorations searches for text live in the current
@@ -1191,7 +1241,7 @@ export default class SideNote extends Plugin {
                     if (this.modifyUpdateTimers[file.path]) {
                         window.clearTimeout(this.modifyUpdateTimers[file.path]);
                     }
-                    this.modifyUpdateTimers[file.path] = window.setTimeout(run, 500);
+                    this.modifyUpdateTimers[file.path] = window.setTimeout(run, 1500);
                 } else {
                     console.debug('[SideNote DEBUG] vault.on(modify) ignored for:', file.path);
                 }
@@ -1559,8 +1609,9 @@ export default class SideNote extends Plugin {
                 if (!editor || !(editor as any).cm) return;
 
                 // Extra safety: skip any editor whose container is inside a Lineage view
-                const cmRoot = (editor as any).cm?.root as HTMLElement | undefined;
-                const container = cmRoot?.closest('.workspace-leaf') as HTMLElement | undefined;
+                const cmRoot = (editor as any).cm?.root;
+                if (!(cmRoot instanceof HTMLElement)) return;
+                const container = cmRoot.closest('.workspace-leaf') as HTMLElement | undefined;
                 if (container && container.classList.contains('lineage')) return;
 
                 const cm = (editor as any).cm;
@@ -1690,49 +1741,6 @@ export default class SideNote extends Plugin {
                             }
                         }
 
-                        // If exact text not found and comment has hash, try hash-based search
-                        if (!highlightFound && comment.selectedTextHash && !comment.isOrphaned) {
-                            const lines = docText.split('\n');
-                            for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-                                const line = lines[lineNum];
-                                for (let startChar = 0; startChar < line.length; startChar++) {
-                                    const candidate = line.substring(startChar, startChar + comment.selectedText.length);
-                                    if (candidate.length === comment.selectedText.length) {
-                                        // Simple hash check using existing hash function
-                                        let hash = 0;
-                                        for (let i = 0; i < candidate.length; i++) {
-                                            hash = ((hash << 5) - hash) + candidate.charCodeAt(i);
-                                        }
-                                        if (Math.abs(hash).toString(16) === comment.selectedTextHash.substring(0, 8)) {
-                                            // Approximate hash match found
-                                            try {
-                                                const line_obj = doc.line(lineNum + 1);
-                                                const from = line_obj.from + startChar;
-                                                const to = from + comment.selectedText.length;
-                                                if (from >= 0 && to <= doc.length && from < to) {
-                                                    decorationsArray.push({
-                                                        from,
-                                                        to,
-                                                        decoration: Decoration.mark({
-                                                            class: 'sidenote-highlight',
-                                                            attributes: {
-                                                                'data-comment-id': comment.id
-                                                            }
-                                                        })
-                                                    });
-                                                    highlightFound = true;
-                                                    break;
-                                                }
-                                            } catch (e) {
-                                                // Line doesn't exist, skip
-                                            }
-                                        }
-                                    }
-                                }
-                                if (highlightFound) break;
-                            }
-                        }
-
                         // Fallback: use stored coordinates if text not found
                         if (!highlightFound && !comment.isOrphaned) {
                             try {
@@ -1799,5 +1807,17 @@ export default class SideNote extends Plugin {
         }, {
             decorations: (v: any) => v.decorations
         });
+    }
+
+    onunload() {
+        // Clean up global error handlers to prevent memory leaks
+        if (this.errorHandler) {
+            window.removeEventListener('error', this.errorHandler);
+            this.errorHandler = null;
+        }
+        if (this.rejectionHandler) {
+            window.removeEventListener('unhandledrejection', this.rejectionHandler);
+            this.rejectionHandler = null;
+        }
     }
 }

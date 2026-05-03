@@ -244,77 +244,35 @@ export class CommentManager {
 
     /**
      * Find text by hash across the entire file
-     * Strategy 2: Search entire file for matching hash using optimized approach
-     * When multiple matches exist, returns the one closest to the hint coordinates
+     * Strategy 2: Search entire file for matching hash (exact length only)
+     * Returns immediately on first match — no tolerance search needed.
      * @param fileContent The current file content
      * @param selectedTextHash The hash to match
-     * @param originalTextLength The length of the original selected text (optimization hint)
-     * @param hintStartLine Starting line hint for proximity scoring
-     * @param hintStartChar Starting character hint for proximity scoring
+     * @param originalTextLength The length of the original selected text
+     * @param hintStartLine Starting line hint (unused, kept for API compat)
+     * @param hintStartChar Starting character hint (unused, kept for API compat)
      * @returns Object with line, startChar, endChar, text or null if not found
      */
     private findTextByHashOptimized(fileContent: string, selectedTextHash: string, originalTextLength: number, hintStartLine?: number, hintStartChar?: number): { line: number; startChar: number; endChar: number; text: string } | null {
         const lines = fileContent.split('\n');
-        let candidates: { line: number; startChar: number; endChar: number; text: string; distance: number }[] = [];
 
-        // Search entire file for text with matching hash
+        // Search entire file for text with matching hash (exact length only)
         for (let lineNum = 0; lineNum < lines.length; lineNum++) {
             const line = lines[lineNum];
+            if (line.length < originalTextLength) continue;
 
-            // First, try exact length match (most common case)
-            if (line.length >= originalTextLength) {
-                for (let startChar = 0; startChar <= line.length - originalTextLength; startChar++) {
-                    const candidate = line.substring(startChar, startChar + originalTextLength);
-                    if (this.generateHash(candidate) === selectedTextHash) {
-                        const distance = (hintStartLine !== undefined && hintStartChar !== undefined)
-                            ? this.calculateDistance(lineNum, startChar, hintStartLine, hintStartChar)
-                            : 0;
-                        candidates.push({
-                            line: lineNum,
-                            startChar: startChar,
-                            endChar: startChar + originalTextLength,
-                            text: candidate,
-                            distance: distance
-                        });
-                    }
+            for (let startChar = 0; startChar <= line.length - originalTextLength; startChar++) {
+                const candidate = line.substring(startChar, startChar + originalTextLength);
+                if (this.generateHash(candidate) === selectedTextHash) {
+                    // Return immediately on first match
+                    return {
+                        line: lineNum,
+                        startChar: startChar,
+                        endChar: startChar + originalTextLength,
+                        text: candidate
+                    };
                 }
             }
-
-            // If not found with exact length, try nearby lengths (±20% tolerance for edge cases)
-            const minLength = Math.max(this.MIN_TEXT_LENGTH, Math.floor(originalTextLength * 0.8));
-            const maxLength = Math.min(line.length, Math.ceil(originalTextLength * 1.2));
-
-            for (let length = minLength; length <= maxLength; length++) {
-                if (length === originalTextLength) continue; // Already checked
-
-                for (let startChar = 0; startChar <= line.length - length; startChar++) {
-                    const candidate = line.substring(startChar, startChar + length);
-                    if (this.generateHash(candidate) === selectedTextHash) {
-                        const distance = (hintStartLine !== undefined && hintStartChar !== undefined)
-                            ? this.calculateDistance(lineNum, startChar, hintStartLine, hintStartChar)
-                            : 0;
-                        candidates.push({
-                            line: lineNum,
-                            startChar: startChar,
-                            endChar: startChar + length,
-                            text: candidate,
-                            distance: distance
-                        });
-                    }
-                }
-            }
-        }
-
-        // Return the candidate closest to the hint coordinates
-        if (candidates.length > 0) {
-            candidates.sort((a, b) => a.distance - b.distance);
-            const closest = candidates[0];
-            return {
-                line: closest.line,
-                startChar: closest.startChar,
-                endChar: closest.endChar,
-                text: closest.text
-            };
         }
 
         return null;
