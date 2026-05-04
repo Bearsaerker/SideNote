@@ -1150,8 +1150,16 @@ export default class SideNote extends Plugin {
         // Listen for active leaf changes to update the comment view
         this.registerEvent(
             this.app.workspace.on('active-leaf-change', (leaf) => {
+                let file: TFile | null = null;
+
                 if (leaf && leaf.view instanceof MarkdownView) {
-                    const file = leaf.view.file;
+                    file = leaf.view.file;
+                } else if (leaf && leaf.view.getViewType() === 'lineage') {
+                    // LineageView extends TextFileView — access file via the view
+                    file = (leaf.view as any).file || null;
+                }
+
+                if (file) {
                     // Update all SideNoteView instances
                     this.app.workspace.getLeavesOfType("sidenote-view").forEach(sideNoteLeaf => {
                         if (sideNoteLeaf.view instanceof SideNoteView) {
