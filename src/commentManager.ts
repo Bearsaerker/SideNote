@@ -246,32 +246,49 @@ export class CommentManager {
      * Find text by hash across the entire file
      * Strategy 2: Search entire file for matching hash (exact length only)
      * Returns immediately on first match — no tolerance search needed.
+     *
+     * Performance note: SHA-256 is collision-resistant, so the only window of
+     * originalTextLength that hashes to selectedTextHash is selectedText itself.
+     * Rather than running a synchronous SHA-256 on every character position of the
+     * file (O(chars) hash calls per comment — the cause of main-thread UI freezes
+     * on large files with many comments), we locate the literal text with the
+     * native, vectorized String.prototype.indexOf and only verify the hash on the
+     * few exact occurrences.
+     *
      * @param fileContent The current file content
+     * @param selectedText The literal selected text (the preimage of selectedTextHash)
      * @param selectedTextHash The hash to match
      * @param originalTextLength The length of the original selected text
      * @param hintStartLine Starting line hint (unused, kept for API compat)
      * @param hintStartChar Starting character hint (unused, kept for API compat)
      * @returns Object with line, startChar, endChar, text or null if not found
      */
-    private findTextByHashOptimized(fileContent: string, selectedTextHash: string, originalTextLength: number, hintStartLine?: number, hintStartChar?: number): { line: number; startChar: number; endChar: number; text: string } | null {
+    private findTextByHashOptimized(fileContent: string, selectedText: string, selectedTextHash: string, originalTextLength: number, hintStartLine?: number, hintStartChar?: number): { line: number; startChar: number; endChar: number; text: string } | null {
+        if (!selectedText || originalTextLength < this.MIN_TEXT_LENGTH) {
+            return null;
+        }
+
         const lines = fileContent.split('\n');
 
-        // Search entire file for text with matching hash (exact length only)
+        // Search entire file for the literal text; verify hash only on exact matches.
         for (let lineNum = 0; lineNum < lines.length; lineNum++) {
             const line = lines[lineNum];
             if (line.length < originalTextLength) continue;
 
-            for (let startChar = 0; startChar <= line.length - originalTextLength; startChar++) {
-                const candidate = line.substring(startChar, startChar + originalTextLength);
+            let fromIndex = 0;
+            let matchIndex: number;
+            while ((matchIndex = line.indexOf(selectedText, fromIndex)) !== -1) {
+                const candidate = line.substring(matchIndex, matchIndex + originalTextLength);
                 if (this.generateHash(candidate) === selectedTextHash) {
                     // Return immediately on first match
                     return {
                         line: lineNum,
-                        startChar: startChar,
-                        endChar: startChar + originalTextLength,
+                        startChar: matchIndex,
+                        endChar: matchIndex + originalTextLength,
                         text: candidate
                     };
                 }
+                fromIndex = matchIndex + 1;
             }
         }
 
@@ -405,6 +422,7 @@ export class CommentManager {
             if (!newPosition && comment.selectedTextHash && comment.selectedText) {
                 const hashMatch = this.findTextByHashOptimized(
                     fileContent,
+                    comment.selectedText,
                     comment.selectedTextHash,
                     comment.selectedText.length,
                     comment.startLine,

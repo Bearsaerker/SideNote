@@ -97,19 +97,54 @@
     gap: 8px;
 }
 
+/* Parent heading display above comment */
+.sidenote-parent-heading {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    background-color: var(--background-secondary-alt, var(--background-primary));
+    border-radius: 4px;
+    border-left: 2px solid var(--interactive-accent);
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.sidenote-parent-heading:hover {
+    background-color: var(--background-modifier-hover);
+}
+
+.sidenote-parent-heading-icon {
+    font-size: 12px;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.sidenote-parent-heading-text {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-muted);
+    font-style: italic;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .sidenote-comment-text-info {
     flex-grow: 1;
     min-width: 0; /* flexアイテムの縮小を許可 */
 }
 
 .sidenote-selected-text {
-    font-size: var(--font-ui-medium);
-    font-weight: 600;
+    font-size: var(--font-ui-smaller);
+    font-weight: normal;
     margin: 0 0 4px 0;
-    color: var(--text-normal);
-    white-space: nowrap;
+    color: #F5F5DC;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
+    word-wrap: break-word;
 }
 
 .sidenote-timestamp {
@@ -325,7 +360,6 @@
     }
 
     .sidenote-selected-text {
-        font-size: 14px;
         margin-bottom: 6px;
     }
 
@@ -392,7 +426,7 @@
     }
 
     .sidenote-selected-text {
-        font-size: 13px;
+        /* inherits default size to match comment content */
     }
 
     .sidenote-timestamp {

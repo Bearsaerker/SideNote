@@ -1,10 +1,11 @@
-import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField, MarkdownRenderer } from "obsidian";
+import { ItemView, WorkspaceLeaf, TFile, App, MarkdownView, Notice, ViewStateResult, Plugin, Modal, Setting, PluginSettingTab, editorLivePreviewField, MarkdownRenderer, debounce } from "obsidian";
 import { Comment, CommentManager } from "./commentManager";
 import { EditorView, Decoration, DecorationSet, ViewPlugin, ViewUpdate } from "@codemirror/view";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { buildMarkdownBlock as buildCommentMarkdownBlock, removeMarkdownCommentBlock, replaceMarkdownCommentBlock } from "./core/markdownCommentBlocks";
 import { bindModalActionHandlers } from "./core/modalActionBindings";
 import { SubmitExecutionGuard } from "./core/submitExecutionGuard";
+import { findParentHeading, clearHeadingCache, clearAllHeadingCache } from "./core/headingLookup";
 
 // Helper function to generate SHA256 hash using Web Crypto API (works on mobile)
 async function generateHash(text: string): Promise<string> {
@@ -64,6 +65,8 @@ interface SideNoteSettings {
     highlightColor: string;
     highlightOpacity: number;
     showResolvedComments: boolean; // Show resolved comments dimmed in the sidebar
+    showParentHeading: boolean; // Show the parent heading above each comment
+    selectedTextLineClamp: number; // Max lines shown for the highlighted text in the sidebar
 }
 
 // Define a new interface for the entire plugin data
@@ -78,10 +81,14 @@ const DEFAULT_SETTINGS: SideNoteSettings = {
     highlightColor: "#FFC800",
     highlightOpacity: 0.2,
     showResolvedComments: false,
+    showParentHeading: true,
+    selectedTextLineClamp: 3,
 };
 
 class SideNoteView extends ItemView {
     private file: TFile | null = null;
+    /** Get the file currently displayed in this view */
+    public get currentFile(): TFile | null { return this.file; }
     private plugin: SideNote;
     private activeCommentId: string | null = null;
     private showAllNotes = false;
@@ -110,7 +117,7 @@ class SideNoteView extends ItemView {
         if (!this.file) {
             this.file = this.app.workspace.getActiveFile();
         }
-        this.renderComments();
+        void this.renderComments();
     }
 
     async setState(state: CustomViewState, result: ViewStateResult): Promise<void> {
@@ -118,7 +125,7 @@ class SideNoteView extends ItemView {
             const file = this.app.vault.getAbstractFileByPath(state.filePath);
             if (file instanceof TFile) {
                 this.file = file;
-                this.renderComments(); // render comments for the new file
+                void this.renderComments(); // render comments for the new file
             }
         }
         await super.setState(state, result);
@@ -130,7 +137,7 @@ class SideNoteView extends ItemView {
      */
     public updateActiveFile(file: TFile | null) {
         this.file = file;
-        this.renderComments();
+        void this.renderComments();
     }
 
     /**
@@ -138,7 +145,7 @@ class SideNoteView extends ItemView {
      */
     public highlightComment(commentId: string) {
         this.activeCommentId = commentId;
-        this.renderComments();
+        void this.renderComments();
         // Scroll to the highlighted comment
         setTimeout(() => {
             const commentEl = this.containerEl.querySelector(`[data-comment-id="${commentId}"]`);
@@ -150,10 +157,41 @@ class SideNoteView extends ItemView {
 
     public setShowAllNotes(value: boolean) {
         this.showAllNotes = value;
-        this.renderComments();
+        void this.renderComments();
     }
 
-    private renderCommentItem(container: HTMLElement, comment: Comment) {
+    /**
+     * Navigate to a heading in the editor by jumping to its line number.
+     * Opens the file if not already open, then scrolls to the heading.
+     */
+    private async navigateToHeading(filePath: string, headingLine: number): Promise<void> {
+        let targetLeaf: WorkspaceLeaf | null = null;
+        this.app.workspace.iterateAllLeaves((leaf: WorkspaceLeaf) => {
+            if (leaf.view instanceof MarkdownView && leaf.view.file?.path === filePath) {
+                targetLeaf = leaf;
+                return false;
+            }
+        });
+
+        if (!targetLeaf) {
+            const file = this.app.vault.getAbstractFileByPath(filePath);
+            if (file instanceof TFile) {
+                const newLeaf = this.app.workspace.getLeaf(true);
+                await newLeaf.openFile(file);
+                targetLeaf = newLeaf;
+            }
+        }
+
+        if (targetLeaf && targetLeaf.view instanceof MarkdownView) {
+            this.app.workspace.setActiveLeaf(targetLeaf, { focus: true });
+            const editor = targetLeaf.view.editor;
+            editor.setCursor({ line: headingLine, ch: 0 });
+            editor.scrollIntoView({ from: { line: headingLine, ch: 0 }, to: { line: headingLine, ch: 0 } }, true);
+            editor.focus();
+        }
+    }
+
+    private async renderCommentItem(container: HTMLElement, comment: Comment) {
         const commentEl = container.createDiv("sidenote-comment-item");
         commentEl.setAttribute("data-comment-id", comment.id);
 
@@ -165,9 +203,40 @@ class SideNoteView extends ItemView {
             commentEl.addClass("active");
         }
 
+        // Render parent heading above the comment header
+        if (this.plugin.settings.showParentHeading && !comment.isOrphaned) {
+            try {
+                console.debug(`[SideNote DEBUG] Looking up heading for comment ${comment.id}, file=${comment.filePath}, line=${comment.startLine}, orphaned=${comment.isOrphaned}`);
+                const parentHeading = await findParentHeading(this.app, comment.filePath, comment.startLine, comment.selectedText);
+                console.debug(`[SideNote DEBUG] Heading lookup result: ${parentHeading ? parentHeading.heading : 'null'}`);
+                if (parentHeading) {
+                    const headingEl = commentEl.createDiv("sidenote-parent-heading");
+                    const headingIcon = headingEl.createSpan("sidenote-parent-heading-icon");
+                    headingIcon.setText("📌");
+                    const headingText = headingEl.createSpan("sidenote-parent-heading-text");
+                    headingText.setText(parentHeading.heading);
+                    headingText.title = `Click to jump to "${parentHeading.heading}"`;
+
+                    // Make heading clickable — jump to the heading in the editor
+                    headingEl.addEventListener("click", async (e) => {
+                        e.stopPropagation();
+                        await this.navigateToHeading(comment.filePath, parentHeading.position.start.line);
+                    });
+                } else {
+                    console.debug(`[SideNote DEBUG] No heading found for comment ${comment.id} at line ${comment.startLine} in ${comment.filePath}`);
+                }
+            } catch (e) {
+                // Silently fail if heading lookup fails (e.g., file deleted)
+                console.debug('[SideNote DEBUG] Failed to lookup parent heading:', e);
+            }
+        } else if (comment.isOrphaned) {
+            console.debug(`[SideNote DEBUG] Skipping heading lookup for orphaned comment ${comment.id}`);
+        }
+
         const headerEl = commentEl.createDiv("sidenote-comment-header");
         const textInfoEl = headerEl.createDiv("sidenote-comment-text-info");
-        textInfoEl.createEl("h4", { text: comment.selectedText, cls: "sidenote-selected-text" });
+        const selectedTextEl = textInfoEl.createEl("h4", { text: comment.selectedText, cls: "sidenote-selected-text" });
+        selectedTextEl.style.webkitLineClamp = String(this.plugin.settings.selectedTextLineClamp);
         textInfoEl.createEl("small", { text: new Date(comment.timestamp).toLocaleString(), cls: "sidenote-timestamp" });
 
         const actionsEl = headerEl.createDiv("sidenote-comment-actions");
@@ -293,7 +362,7 @@ class SideNoteView extends ItemView {
         });
     }
 
-    public renderComments() { // Made public for settings tab to re-render
+    public async renderComments() { // Made public for settings tab to re-render
         try {
             console.debug('[SideNote DEBUG] renderComments called, file:', this.file?.path, 'showAllNotes:', this.showAllNotes);
             this.containerEl.empty();
@@ -306,11 +375,11 @@ class SideNoteView extends ItemView {
             });
             toggleBtn.onclick = () => {
                 this.showAllNotes = !this.showAllNotes;
-                this.renderComments();
+                void this.renderComments();
             };
 
             if (this.showAllNotes) {
-                this.renderAllNotesView();
+                await this.renderAllNotesView();
                 return;
             }
 
@@ -335,10 +404,10 @@ class SideNoteView extends ItemView {
 
                 if (commentsForFile.length > 0) {
                     const commentsContainer = this.containerEl.createDiv("sidenote-comments-container");
-                    commentsForFile.forEach((comment) => {
+                    for (const comment of commentsForFile) {
                         console.debug('[SideNote DEBUG] renderCommentItem for:', comment.id);
-                        this.renderCommentItem(commentsContainer, comment);
-                    });
+                        await this.renderCommentItem(commentsContainer, comment);
+                    }
                 } else {
                     const emptyStateEl = this.containerEl.createDiv("sidenote-empty-state");
                     emptyStateEl.createEl("p", { text: "No comments for this file yet." });
@@ -355,7 +424,7 @@ class SideNoteView extends ItemView {
         }
     }
 
-    private renderAllNotesView() {
+    private async renderAllNotesView() {
         let allComments = this.plugin.commentManager.getComments();
 
         if (!this.plugin.settings.showResolvedComments) {
@@ -390,7 +459,7 @@ class SideNoteView extends ItemView {
             }
 
             for (const comment of sorted) {
-                this.renderCommentItem(fileSection, comment);
+                await this.renderCommentItem(fileSection, comment);
             }
         }
     }
@@ -648,7 +717,7 @@ class SideNoteSettingTab extends PluginSettingTab {
                         // Re-render the custom view if it's open to apply the new sort order
                         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
                             if (leaf.view instanceof SideNoteView) {
-                                leaf.view.renderComments();
+                                void leaf.view.renderComments();
                             }
                         });
                     })
@@ -680,7 +749,44 @@ class SideNoteSettingTab extends PluginSettingTab {
                         // Re-render the custom view if it's open to apply the new setting
                         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
                             if (leaf.view instanceof SideNoteView) {
-                                leaf.view.renderComments();
+                                void leaf.view.renderComments();
+                            }
+                        });
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Show parent heading")
+            .setDesc("Display the heading above each comment for structural context.")
+            .addToggle((toggle) =>
+                toggle
+                    .setValue(this.plugin.settings.showParentHeading)
+                    .onChange(async (value: boolean) => {
+                        this.plugin.settings.showParentHeading = value;
+                        await this.plugin.saveData();
+                        // Re-render the custom view if it's open to apply the new setting
+                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                            if (leaf.view instanceof SideNoteView) {
+                                void leaf.view.renderComments();
+                            }
+                        });
+                    })
+            );
+
+        new Setting(containerEl)
+            .setName("Highlighted text lines")
+            .setDesc("Maximum number of lines shown for the highlighted text in the sidebar.")
+            .addSlider((slider) =>
+                slider
+                    .setLimits(1, 10, 1)
+                    .setValue(this.plugin.settings.selectedTextLineClamp)
+                    .onChange(async (value: number) => {
+                        this.plugin.settings.selectedTextLineClamp = value;
+                        await this.plugin.saveData();
+                        // Re-render the view to apply the new line limit
+                        this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                            if (leaf.view instanceof SideNoteView) {
+                                void leaf.view.renderComments();
                             }
                         });
                     })
@@ -758,7 +864,7 @@ class SideNoteSettingTab extends PluginSettingTab {
                         // Re-render views
                         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
                             if (leaf.view instanceof SideNoteView) {
-                                leaf.view.renderComments();
+                                void leaf.view.renderComments();
                             }
                         });
                         new Notice(`Deleted ${deleted} orphaned comment(s)!`);
@@ -1177,11 +1283,14 @@ export default class SideNote extends Plugin {
             this.app.vault.on('rename', (file, oldPath) => {
                 if (file instanceof TFile) {
                     this.commentManager.renameFile(oldPath, file.path);
+                    // Clear heading cache for both old and new paths
+                    clearHeadingCache(oldPath);
+                    clearHeadingCache(file.path);
                     void this.saveData();
                     // Update views
                     this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
                         if (leaf.view instanceof SideNoteView) {
-                            leaf.view.renderComments();
+                            void leaf.view.renderComments();
                         }
                     });
                 }
@@ -1203,7 +1312,7 @@ export default class SideNote extends Plugin {
                         // Re-render views
                         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
                             if (leaf.view instanceof SideNoteView) {
-                                leaf.view.renderComments();
+                                void leaf.view.renderComments();
                             }
                         });
                     } catch (error) {
@@ -1223,6 +1332,8 @@ export default class SideNote extends Plugin {
                     // Debounce modify events to avoid cascade with editor-change.
                     // Use a longer delay (1500ms) to give third-party plugins like
                     // Lineage time to finish their file operations before we read.
+                    // Clear heading cache so next lookup gets fresh data
+                    clearHeadingCache(file.path);
                     const run = async () => {
                         console.debug('[SideNote DEBUG] Updating comment coordinates for md file:', file.path);
                         try {
@@ -1261,6 +1372,32 @@ export default class SideNote extends Plugin {
         // document, so the ViewPlugin's docChanged trigger is sufficient.
         // A global editor-change → refreshAll loop was the main cause of
         // UI freezes when editing Lineage cards.
+
+        // Clear heading cache and re-render SideNote view when metadata cache changes.
+        // Mirrors Quiet Outline's pattern: on metadata change, invalidate cache + refresh UI.
+        // Critical for Lineage view where headings may update without vault-level events.
+        const debouncedRefresh = debounce(
+            (filePath: string) => {
+                clearHeadingCache(filePath);
+                // Re-render all SideNote views - debouncing prevents excessive re-renders.
+                // This covers both "Current File" and "All Notes" modes.
+                this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
+                    if (leaf.view instanceof SideNoteView) {
+                        void leaf.view.renderComments();
+                    }
+                });
+            },
+            300,
+            true
+        );
+
+        this.registerEvent(
+            this.app.metadataCache.on('changed', (file, _path, _cache) => {
+                if (file instanceof TFile) {
+                    debouncedRefresh(file.path);
+                }
+            })
+        );
     }
 
     /**
@@ -1313,7 +1450,7 @@ export default class SideNote extends Plugin {
         await this.saveData();
         this.app.workspace.getLeavesOfType("sidenote-view").forEach(leaf => {
             if (leaf.view instanceof SideNoteView) {
-                leaf.view.renderComments();
+                void leaf.view.renderComments();
             }
         });
         // Force immediate refresh of editor decorations
@@ -1377,6 +1514,8 @@ export default class SideNote extends Plugin {
             highlightColor: loadedData.highlightColor || DEFAULT_SETTINGS.highlightColor,
             highlightOpacity: loadedData.highlightOpacity !== undefined ? loadedData.highlightOpacity : DEFAULT_SETTINGS.highlightOpacity,
             showResolvedComments: loadedData.showResolvedComments !== undefined ? loadedData.showResolvedComments : DEFAULT_SETTINGS.showResolvedComments,
+            showParentHeading: loadedData.showParentHeading !== undefined ? loadedData.showParentHeading : DEFAULT_SETTINGS.showParentHeading,
+            selectedTextLineClamp: loadedData.selectedTextLineClamp !== undefined ? loadedData.selectedTextLineClamp : DEFAULT_SETTINGS.selectedTextLineClamp,
         };
         this.comments = loadedData.comments || [];
         // Apply highlight color on load
@@ -1827,5 +1966,7 @@ export default class SideNote extends Plugin {
             window.removeEventListener('unhandledrejection', this.rejectionHandler);
             this.rejectionHandler = null;
         }
+        // Clear heading cache
+        clearAllHeadingCache();
     }
 }
